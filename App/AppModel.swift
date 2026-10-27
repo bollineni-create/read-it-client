@@ -73,6 +73,8 @@ final class AppModel {
     var showAddSubreddit = false
     var editingSubreddit: Subreddit?
     var showOnboarding = false
+    /// Mirrors `settings.syncFromMenuBar` so the app's scene body doesn't observe all of `settings`.
+    var showsMenuBarExtra = false
     var storageStats: StorageStats?
     var databaseError: String?
 
@@ -82,6 +84,7 @@ final class AppModel {
         let store = SettingsStore()
         let loaded = store.load()
         settings = loaded
+        showsMenuBarExtra = loaded.syncFromMenuBar
         let box = SettingsBox(loaded)
         settingsBox = box
 
@@ -323,6 +326,7 @@ final class AppModel {
     // MARK: Settings side effects
 
     private func settingsDidChange(from old: AppSettings) {
+        guard settings != old else { return }
         settingsBox.value = settings
         settingsStore.save(settings)
 
@@ -331,6 +335,9 @@ final class AppModel {
         }
         if old.hideImageAndMemePosts != settings.hideImageAndMemePosts || old.minimumUpvotes != settings.minimumUpvotes {
             reloadAll()
+        }
+        if old.syncFromMenuBar != settings.syncFromMenuBar {
+            showsMenuBarExtra = settings.syncFromMenuBar
         }
         if old.indexInSpotlight != settings.indexInSpotlight {
             if settings.indexInSpotlight { reindexSpotlight() } else { SpotlightIndexer.removeAll() }
