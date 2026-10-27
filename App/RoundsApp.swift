@@ -19,9 +19,7 @@ struct RoundsApp: App {
                     .keyboardShortcut("n", modifiers: [.command, .shift])
             }
             CommandMenu("Library") {
-                Button("Sync Now") { model.syncNow() }
-                    .keyboardShortcut("r", modifiers: .command)
-                    .disabled(model.isSyncing)
+                SyncNowCommand(model: model)
                 Divider()
                 Button("All Threads") { model.selection = .all }
                     .keyboardShortcut("1", modifiers: .command)
@@ -37,9 +35,11 @@ struct RoundsApp: App {
                 .environment(model)
         }
 
+        // Reads only `showsMenuBarExtra`, and writes back only on a real change: a write during a
+        // scene update re-runs this body, which looped until the stack overflowed at launch.
         MenuBarExtra("Rounds", systemImage: "books.vertical", isInserted: Binding(
-            get: { model.settings.syncFromMenuBar },
-            set: { model.settings.syncFromMenuBar = $0 }
+            get: { model.showsMenuBarExtra },
+            set: { if model.settings.syncFromMenuBar != $0 { model.settings.syncFromMenuBar = $0 } }
         )) {
             MenuBarView()
                 .environment(model)
@@ -51,6 +51,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Quit with the last window unless menu-bar syncing is on.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         !SettingsStore().load().syncFromMenuBar
+    }
+}
+
+/// A view, not inline in `commands`, so `isSyncing` changes refresh this item instead of the whole app body.
+struct SyncNowCommand: View {
+    let model: AppModel
+
+    var body: some View {
+        Button("Sync Now") { model.syncNow() }
+            .keyboardShortcut("r", modifiers: .command)
+            .disabled(model.isSyncing)
     }
 }
 
