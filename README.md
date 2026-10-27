@@ -45,6 +45,20 @@ Xcode resolves GRDB through Swift Package Manager on the first build, so the fir
 
 If the checked-in project ever gives you trouble, regenerate it with XcodeGen: `brew install xcodegen && xcodegen generate`. The spec is in `project.yml`.
 
+### Keep it up to date automatically
+
+```bash
+scripts/install-auto-update.sh
+```
+
+This installs a background job (a launch agent) that checks GitHub at login and every 5 minutes. When `main` has new commits, it pulls them into this clone, builds a Release copy, and installs it as `/Applications/Rounds.app`. If Rounds is open, it quits it and reopens the new version, then posts a notification. Use the copy in `/Applications` from then on.
+
+- It needs Xcode, and git has to reach GitHub without prompting (HTTPS with the macOS keychain, or an SSH key in your agent).
+- Keep the clone outside Desktop, Documents and Downloads, because macOS blocks background jobs there.
+- Your work is left alone: if the clone is on another branch or has uncommitted changes, the job skips that run.
+- A commit that fails to build leaves the installed app as it was and posts a notification. The next commit is tried as normal.
+- The log is `~/Library/Logs/Rounds-auto-update.log`. Turn it off with `scripts/uninstall-auto-update.sh`.
+
 ## 3. First launch
 
 Onboarding walks you through:
