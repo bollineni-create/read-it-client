@@ -166,3 +166,15 @@ A single FTS5 table (`porter unicode61` tokenizer) has one row per thread, cover
 - Database: `~/Library/Containers/com.naren.rounds/Data/Library/Application Support/Rounds/rounds.sqlite`
 - Settings: the app's sandboxed `UserDefaults`
 - Secrets: login Keychain, service `com.naren.rounds`
+
+## Web version
+
+`web/` is a static port of Rounds for browsers and phones (it is what the bollineni-create launcher hosts at `/rounds/`). It has no build step: `index.html`, `css/app.css` and plain scripts in `js/` (`core.js` for parsing, classification, scoring and search; `reddit.js`, `db.js`, `sync.js`, `app.js`).
+
+- Same model as the Mac app: subreddits with a time window, kinds and keywords; relevance scoring with the same weights; resources pulled from posts and comments; Saved threads that are never pruned.
+- Data stays in the browser (IndexedDB). Search is a BM25 index over titles, bodies, comments and resources, built in memory.
+- Reddit access is read-only. Hosted on the launcher, `/rounds/api/*` is a server route that uses Reddit's OAuth API (installed-client grant) when `REDDIT_CLIENT_ID` is set there. Without it, or when the page runs on its own, Rounds reads Reddit's public JSON straight from the browser and falls back to the server route when Reddit refuses the browser.
+- A sync fetches comments for at most 30 threads per subreddit, to stay within Reddit's limits; later syncs fill in the rest.
+- Layout: three panes on wide screens; on narrow ones (phones, a folded Surface Duo) the subreddits move into a drawer and the list and thread stack with a back button.
+
+Preview locally with `python3 -m http.server 8650 --directory web`. Run `node -e "require('./web/js/core.js')"` to load the core in Node for quick checks.
