@@ -20,17 +20,22 @@ public struct RelevanceWeights: Codable, Equatable, Sendable {
 public struct SubredditStats: Sendable, Equatable {
     public var maxScore: Int
     public var maxComments: Int
+    /// Deepest top-listing rank among the subreddit's threads.
+    public var maxRank: Int
 
-    public init(maxScore: Int, maxComments: Int) {
+    public init(maxScore: Int, maxComments: Int, maxRank: Int = 0) {
         self.maxScore = maxScore
         self.maxComments = maxComments
+        self.maxRank = maxRank
     }
 }
 
 public struct ScoringInput: Sendable {
     public var subName: String
     public var window: TimeWindow
+    /// -1 when unknown; `topRank` stands in for it.
     public var score: Int
+    public var topRank: Int?
     public var numComments: Int
     public var maxReplyDepth: Int
     public var uniqueLinkCount: Int
@@ -38,11 +43,12 @@ public struct ScoringInput: Sendable {
     public var body: String
     public var commentBodies: [String]
 
-    public init(subName: String, window: TimeWindow, score: Int, numComments: Int, maxReplyDepth: Int,
+    public init(subName: String, window: TimeWindow, score: Int, topRank: Int? = nil, numComments: Int, maxReplyDepth: Int,
                 uniqueLinkCount: Int, title: String, body: String, commentBodies: [String]) {
         self.subName = subName
         self.window = window
         self.score = score
+        self.topRank = topRank
         self.numComments = numComments
         self.maxReplyDepth = maxReplyDepth
         self.uniqueLinkCount = uniqueLinkCount
@@ -76,7 +82,9 @@ public enum RelevanceScorer {
         weights: RelevanceWeights,
         keywords: [String]
     ) -> ScoreResult {
-        let upvotes = logNormalized(input.score, max: stats.maxScore)
+        let upvotes = input.score >= 0
+            ? logNormalized(input.score, max: stats.maxScore)
+            : rankSignal(input.topRank, maxRank: stats.maxRank)
         let comments = logNormalized(input.numComments, max: stats.maxComments)
         let depth = min(Double(max(input.maxReplyDepth, 0)), depthSaturation) / depthSaturation
         let discussion = 0.7 * comments + 0.3 * depth
@@ -131,6 +139,13 @@ public enum RelevanceScorer {
         return log1p(v) / log1p(m)
     }
 
+    /// Without upvote counts, a thread's place in the top listing stands in: #1 scores 1, the last one close to 0.
+    static func rankSignal(_ rank: Int?, maxRank: Int) -> Double {
+        guard let rank, rank >= 1 else { return 0 }
+        let depth = Double(Swift.max(maxRank, rank))
+        return 1 - Double(rank - 1) / depth
+    }
+
     private static func sanitized(_ w: RelevanceWeights) -> RelevanceWeights {
         RelevanceWeights(
             upvotes: max(w.upvotes, 0), discussion: max(w.discussion, 0),
@@ -157,8 +172,9 @@ public enum RelevanceScorer {
             // Mention a strong secondary signal when it adds information.
             if ranked.count > 1, ranked[1].1 >= lead.1 * 0.6 {
                 switch ranked[1].0 {
-                case .upvotes: parts.append("\(compact(input.score)) upvotes")
-                case .discussion: parts.append("\(compact(input.numComments)) comments")
+                case .upvotes where input.score >= 0: parts.append("\(compact(input.score)) upvotes")
+                case .upvotes: if let rank = input.topRank { parts.append("#\(rank) of the top posts") }
+                case .discussion where input.numComments >= 0: parts.append("\(compact(input.numComments)) comments")
                 case .resources where input.uniqueLinkCount > 0:
                     parts.append(input.uniqueLinkCount == 1 ? "1 link shared" : "\(input.uniqueLinkCount) links shared")
                 default: break

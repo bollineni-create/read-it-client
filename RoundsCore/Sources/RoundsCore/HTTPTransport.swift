@@ -35,6 +35,7 @@ public enum RedditError: Error, Equatable, Sendable, LocalizedError {
     case subredditNotFound(String)
     case oauthDenied(String)
     case decoding(String)
+    case needsAPIAccess
 
     public var errorDescription: String? {
         switch self {
@@ -50,6 +51,7 @@ public enum RedditError: Error, Equatable, Sendable, LocalizedError {
         case .subredditNotFound(let name): "r/\(name) doesn't exist."
         case .oauthDenied(let reason): "Reddit sign-in failed: \(reason)."
         case .decoding(let what): "Couldn't read Reddit's response (\(what))."
+        case .needsAPIAccess: "This needs a Reddit client ID that Reddit has approved for API access."
         }
     }
 }

@@ -113,11 +113,14 @@ public struct RedditThread: Codable, Hashable, Identifiable, Sendable, Fetchable
     public var title: String
     public var body: String
     public var author: String
+    /// -1 when unknown (threads read from feeds).
     public var score: Int
     public var numComments: Int
     public var createdUTC: Date
     public var permalink: String
     public var postURL: String?
+    /// Position in the subreddit's top listing at the last sync (1 = best); nil when it wasn't there.
+    public var topRank: Int?
     public var kind: ThreadKind
     public var relevance: Double
     public var why: String
@@ -133,7 +136,7 @@ public struct RedditThread: Codable, Hashable, Identifiable, Sendable, Fetchable
 
     public init(
         id: String, sub: String, subName: String, title: String, body: String, author: String,
-        score: Int, numComments: Int, createdUTC: Date, permalink: String, postURL: String? = nil,
+        score: Int, numComments: Int, createdUTC: Date, permalink: String, postURL: String? = nil, topRank: Int? = nil,
         kind: ThreadKind = .discussion, relevance: Double = 0, why: String = "",
         matchedKeywords: [String] = [], isSaved: Bool = false, savedOnReddit: Bool = false,
         linkCount: Int = 0, maxDepth: Int = 0, isImageOnly: Bool = false,
@@ -150,6 +153,7 @@ public struct RedditThread: Codable, Hashable, Identifiable, Sendable, Fetchable
         self.createdUTC = createdUTC
         self.permalink = permalink
         self.postURL = postURL
+        self.topRank = topRank
         self.kind = kind
         self.relevance = relevance
         self.why = why
@@ -163,6 +167,8 @@ public struct RedditThread: Codable, Hashable, Identifiable, Sendable, Fetchable
         self.firstSeenAt = firstSeenAt
         self.updatedAt = updatedAt
     }
+
+    public var hasScore: Bool { score >= 0 }
 
     public var redditURL: URL? {
         URL(string: "https://www.reddit.com" + permalink)
@@ -178,6 +184,7 @@ public struct Comment: Codable, Hashable, Identifiable, Sendable, FetchableRecor
     public var threadId: String
     public var author: String
     public var body: String
+    /// -1 when unknown (comments read from feeds).
     public var score: Int
     public var depth: Int
     /// Order in which Reddit returned the comment (top sort, depth first).
@@ -192,6 +199,8 @@ public struct Comment: Codable, Hashable, Identifiable, Sendable, FetchableRecor
         self.depth = depth
         self.position = position
     }
+
+    public var hasScore: Bool { score >= 0 }
 }
 
 // MARK: - Resource

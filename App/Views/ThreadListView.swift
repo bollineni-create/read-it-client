@@ -69,14 +69,6 @@ struct ThreadListView: View {
             } description: {
                 Text("Save threads from the detail pane, or connect your Reddit account in Settings to import the threads you've saved there.")
             }
-        } else if !model.hasClientID {
-            ContentUnavailableView {
-                Label("Connect to Reddit", systemImage: "key")
-            } description: {
-                Text("Add your Reddit client ID to start syncing.")
-            } actions: {
-                Button("Set Up…") { model.showOnboarding = true }
-            }
         } else {
             ContentUnavailableView {
                 Label("No threads yet", systemImage: "tray")
@@ -112,7 +104,12 @@ struct ThreadRow: View {
                 .font(.headline)
                 .lineLimit(2)
             HStack(spacing: 12) {
-                Label(thread.score.compact, systemImage: "arrow.up")
+                if thread.hasScore {
+                    Label(thread.score.compact, systemImage: "arrow.up")
+                } else if let rank = thread.topRank {
+                    Label("#\(rank)", systemImage: "chart.bar")
+                        .help("Place in the subreddit's top list")
+                }
                 Label(thread.numComments.compact, systemImage: "bubble.left")
                 Label("\(thread.linkCount)", systemImage: "link")
                 Spacer()

@@ -5,19 +5,18 @@ struct OnboardingView: View {
     @Environment(AppModel.self) private var model
 
     enum Step: Int, CaseIterable {
-        case createApp, clientID, subreddits, firstSync
+        case source, subreddits, firstSync
 
         var title: String {
             switch self {
-            case .createApp: "Create a Reddit app"
-            case .clientID: "Paste your client ID"
+            case .source: "How Rounds reads Reddit"
             case .subreddits: "Choose subreddits"
             case .firstSync: "Run the first sync"
             }
         }
     }
 
-    @State private var step: Step = .createApp
+    @State private var step: Step = .source
     @State private var clientID = ""
     @State private var username = ""
     @State private var verifyMessage: String?
@@ -50,8 +49,7 @@ struct OnboardingView: View {
 
             Group {
                 switch step {
-                case .createApp: createApp
-                case .clientID: clientIDStep
+                case .source: sourceStep
                 case .subreddits: subredditsStep
                 case .firstSync: firstSyncStep
                 }
@@ -59,8 +57,8 @@ struct OnboardingView: View {
             .frame(maxWidth: .infinity, minHeight: 220, alignment: .topLeading)
 
             HStack {
-                if step != .createApp {
-                    Button("Back") { step = Step(rawValue: step.rawValue - 1) ?? .createApp }
+                if step != .source {
+                    Button("Back") { step = Step(rawValue: step.rawValue - 1) ?? .source }
                 }
                 Spacer()
                 if step == .firstSync {
@@ -69,7 +67,7 @@ struct OnboardingView: View {
                 } else {
                     Button("Continue") { advance() }
                         .keyboardShortcut(.defaultAction)
-                        .disabled(step == .clientID && !verified)
+                        .disabled(verifying)
                 }
             }
         }
@@ -83,53 +81,44 @@ struct OnboardingView: View {
     }
 
     private func advance() {
-        if step == .clientID {
+        if step == .source {
             model.settings.redditUsername = username.trimmingCharacters(in: .whitespaces)
         }
         step = Step(rawValue: step.rawValue + 1) ?? .firstSync
     }
 
-    private var createApp: some View {
+    private var sourceStep: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Rounds reads Reddit through the official API, which needs a free app registration in your account. It never posts, votes or comments.")
-            VStack(alignment: .leading, spacing: 6) {
-                Text("1. Open [reddit.com/prefs/apps](https://www.reddit.com/prefs/apps) and sign in.")
-                Text("2. Click **create another app…** at the bottom.")
-                Text("3. Name it **Rounds** and choose **installed app**.")
-                Text("4. Set the redirect URI to **\(RedditOAuthConfig.redirectURI)**.")
-                Text("5. Click **create app**. The client ID is the short string under the app name.")
-            }
-            .padding(12)
-            .background(RoundedRectangle(cornerRadius: 8).fill(Color.roundsTeal.opacity(0.08)))
-            Link(destination: URL(string: "https://www.reddit.com/prefs/apps")!) {
-                Label("Open reddit.com/prefs/apps", systemImage: "arrow.up.right.square")
-            }
-        }
-    }
-
-    private var clientIDStep: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Paste the client ID. It's saved in your Keychain, never in the app's files.")
-            HStack {
-                TextField("Client ID", text: $clientID)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.body.monospaced())
-                    .onChange(of: clientID) { verified = false; verifyMessage = nil }
-                Button("Verify") { verify() }
-                    .disabled(clientID.trimmingCharacters(in: .whitespaces).isEmpty || verifying)
-            }
-            if verifying {
-                ProgressView().controlSize(.small)
-            } else if let verifyMessage {
-                Label(verifyMessage, systemImage: verified ? "checkmark.circle.fill" : "xmark.octagon.fill")
-                    .foregroundStyle(verified ? Color.roundsTeal : Color.red)
-            }
-            Divider().padding(.vertical, 4)
-            Text("Your Reddit username (optional). Reddit asks API clients to identify themselves in the User-Agent.")
+            Text("Rounds reads each subreddit's public feed, so there's nothing to set up. It never posts, votes or comments.")
+            Text("Feeds list the top 100 posts of the period with their text and top comments, but no upvote counts, so Rounds ranks threads by their place in Reddit's top list.")
+                .foregroundStyle(.secondary)
+            Text("Your Reddit username (optional). Rounds sends it in the User-Agent so Reddit knows who's asking.")
                 .foregroundStyle(.secondary)
             TextField("username", text: $username)
                 .textFieldStyle(.roundedBorder)
                 .frame(maxWidth: 240)
+            DisclosureGroup("I have a Reddit API client ID") {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Reddit now approves API access case by case. With an approved “installed app” client ID, Rounds also gets upvote counts and reply threads, and can import your saved posts. It's stored in your Keychain.")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        TextField("Client ID", text: $clientID)
+                            .textFieldStyle(.roundedBorder)
+                            .font(.body.monospaced())
+                            .onChange(of: clientID) { verified = false; verifyMessage = nil }
+                        Button("Verify") { verify() }
+                            .disabled(clientID.trimmingCharacters(in: .whitespaces).isEmpty || verifying)
+                    }
+                    if verifying {
+                        ProgressView().controlSize(.small)
+                    } else if let verifyMessage {
+                        Label(verifyMessage, systemImage: verified ? "checkmark.circle.fill" : "xmark.octagon.fill")
+                            .foregroundStyle(verified ? Color.roundsTeal : Color.red)
+                    }
+                }
+                .padding(.top, 6)
+            }
         }
     }
 
@@ -161,7 +150,7 @@ struct OnboardingView: View {
 
     private var firstSyncStep: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Rounds pulls the top and hot threads from each subreddit, saves their top comments and every shared link, and scores them for relevance. The first sync takes a few minutes because Reddit limits how fast apps can read.")
+            Text("Rounds pulls the top and hot threads from each subreddit, saves their top comments and every shared link, and scores them for relevance. Threads show up right away; comments fill in over the next few syncs because Reddit limits how fast apps can read.")
             if model.isSyncing || syncStarted {
                 VStack(alignment: .leading, spacing: 6) {
                     ProgressView(value: model.syncProgress ?? 0)
@@ -190,6 +179,7 @@ struct OnboardingView: View {
         Task {
             await model.setClientID(clientID)
             let error = await model.verifyClientID()
+            if error != nil { await model.setClientID("") }
             verified = error == nil
             verifyMessage = error ?? "Connected to Reddit."
             verifying = false

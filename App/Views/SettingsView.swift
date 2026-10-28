@@ -159,6 +159,7 @@ private struct RelevanceSettings: View {
 
             Section("Filters") {
                 Toggle("Hide image-only and meme posts", isOn: $model.settings.hideImageAndMemePosts)
+                    .help("Threads from public feeds have no upvote count, so the upvote filter skips them.")
                 Stepper(value: $model.settings.minimumUpvotes, in: 0...10_000, step: 5) {
                     LabeledContent("Hide threads with fewer than") {
                         TextField("Upvotes", value: $model.settings.minimumUpvotes, format: .number)
@@ -315,9 +316,11 @@ private struct AccountSettings: View {
                     .font(.caption.monospaced())
                     .foregroundStyle(.secondary)
             } header: {
-                Text("App credentials")
+                Text("API client ID (optional)")
             } footer: {
-                Text("Create an “installed app” at reddit.com/prefs/apps with redirect URI \(RedditOAuthConfig.redirectURI). The client ID and tokens are stored in your Keychain.")
+                Text(model.hasClientID
+                     ? "Rounds reads Reddit through the API. Clear the client ID to go back to public feeds."
+                     : "Rounds reads Reddit's public feeds. Reddit now approves API access case by case; with an approved “installed app” (redirect URI \(RedditOAuthConfig.redirectURI)), Rounds also gets upvote counts and reply threads. The client ID and tokens are stored in your Keychain.")
                     .foregroundStyle(.secondary)
             }
 
@@ -331,7 +334,9 @@ private struct AccountSettings: View {
                     }
                 } else {
                     HStack {
-                        Text("Connect to import the threads you've saved on Reddit. Rounds asks only for read, history and identity access.")
+                        Text(model.hasClientID
+                             ? "Connect to import the threads you've saved on Reddit. Rounds asks only for read, history and identity access."
+                             : "Importing the threads you've saved on Reddit needs an API client ID.")
                             .foregroundStyle(.secondary)
                         Spacer()
                         Button("Connect…") { Task { await model.connectAccount() } }
@@ -354,7 +359,9 @@ private struct AccountSettings: View {
         verifying = true
         Task {
             await model.setClientID(clientID)
-            if let error = await model.verifyClientID() {
+            if clientID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                clientIDStatus = "✓ Using public feeds."
+            } else if let error = await model.verifyClientID() {
                 clientIDStatus = error
             } else {
                 clientIDStatus = "✓ Client ID works."

@@ -11,6 +11,53 @@ public protocol RedditAPI: Sendable {
     func about(subreddit: String) async throws -> SubredditAbout
     func me() async throws -> RedditIdentity
     func saved(username: String, after: String?) async throws -> RedditListing<PostThing>
+    /// Most threads a sync pass fetches comments for in one subreddit; nil for no cap.
+    var commentFetchesPerPass: Int? { get }
+}
+
+extension RedditAPI {
+    public var commentFetchesPerPass: Int? { nil }
+}
+
+/// Uses the OAuth API when a client ID is set and the public feeds otherwise.
+public struct RedditSource: RedditAPI {
+    private let oauth: RedditAPI
+    private let feeds: RedditAPI
+    private let useOAuth: @Sendable () -> Bool
+
+    public init(oauth: RedditAPI, feeds: RedditAPI, useOAuth: @escaping @Sendable () -> Bool) {
+        self.oauth = oauth
+        self.feeds = feeds
+        self.useOAuth = useOAuth
+    }
+
+    private var current: RedditAPI { useOAuth() ? oauth : feeds }
+
+    public func top(subreddit: String, window: TimeWindow, limit: Int, after: String?) async throws -> RedditListing<PostThing> {
+        try await current.top(subreddit: subreddit, window: window, limit: limit, after: after)
+    }
+
+    public func hot(subreddit: String, limit: Int) async throws -> RedditListing<PostThing> {
+        try await current.hot(subreddit: subreddit, limit: limit)
+    }
+
+    public func comments(threadID: String, limit: Int) async throws -> CommentsResponse {
+        try await current.comments(threadID: threadID, limit: limit)
+    }
+
+    public func about(subreddit: String) async throws -> SubredditAbout {
+        try await current.about(subreddit: subreddit)
+    }
+
+    public func me() async throws -> RedditIdentity {
+        try await current.me()
+    }
+
+    public func saved(username: String, after: String?) async throws -> RedditListing<PostThing> {
+        try await current.saved(username: username, after: after)
+    }
+
+    public var commentFetchesPerPass: Int? { current.commentFetchesPerPass }
 }
 
 /// `oauth.reddit.com` client: bearer auth, rate-limit queue, 429 back-off and one retry on 401.

@@ -29,6 +29,11 @@ public struct PostThing: Decodable, Sendable {
 
     private enum Keys: String, CodingKey { case kind, data }
 
+    public init(_ post: PostDTO) {
+        kind = "t3"
+        data = post
+    }
+
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: Keys.self)
         kind = try c.decode(String.self, forKey: .kind)
@@ -42,7 +47,9 @@ public struct PostDTO: Decodable, Sendable, Equatable {
     public var title: String
     public var selftext: String
     public var author: String
+    /// -1 when unknown (posts read from feeds).
     public var score: Int
+    /// -1 when unknown (posts read from feeds).
     public var numComments: Int
     public var createdUTC: Double
     public var permalink: String
@@ -65,6 +72,30 @@ public struct PostDTO: Decodable, Sendable, Equatable {
         case isVideo = "is_video"
         case linkFlairText = "link_flair_text"
         case over18 = "over_18"
+    }
+
+    public init(
+        id: String, subreddit: String, title: String, selftext: String = "", author: String, score: Int, numComments: Int,
+        createdUTC: Double, permalink: String, url: String? = nil, postHint: String? = nil, isSelf: Bool = true,
+        isGallery: Bool = false, isVideo: Bool = false, linkFlairText: String? = nil, stickied: Bool = false, over18: Bool = false
+    ) {
+        self.id = id
+        self.subreddit = subreddit
+        self.title = title
+        self.selftext = selftext
+        self.author = author
+        self.score = score
+        self.numComments = numComments
+        self.createdUTC = createdUTC
+        self.permalink = permalink
+        self.url = url
+        self.postHint = postHint
+        self.isSelf = isSelf
+        self.isGallery = isGallery
+        self.isVideo = isVideo
+        self.linkFlairText = linkFlairText
+        self.stickied = stickied
+        self.over18 = over18
     }
 
     public init(from decoder: Decoder) throws {
