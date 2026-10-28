@@ -21,7 +21,8 @@ public struct SyncReport: Sendable {
 
 /// Incremental syncer. One pass per subreddit:
 /// 1. fetch `/top?t=window` (paginated up to the keep limit) and `/hot`;
-/// 2. upsert threads by id, fetching comments only for new threads or ones whose comment count changed;
+/// 2. upsert threads by id, then fetch comments only for new threads or ones whose comment count changed
+///    (capped per pass when the API asks for it, as the anonymous feeds do);
 /// 3. re-score the subreddit; 4. prune beyond the keep limit (saved threads are always kept).
 public actor SyncEngine {
     private let db: AppDatabase
@@ -105,14 +106,16 @@ public actor SyncEngine {
         let settings = await settings()
         let keep = max(settings.threadsPerSubreddit, 1)
 
-        // 1. Listings.
+        // 1. Listings. Positions in the top listing become ranks, which stand in for scores feeds don't carry.
         var posts: [PostDTO] = []
         var seen = Set<String>()
+        var ranks: [String: Int] = [:]
         var after: String?
         repeat {
             let page = try await api.top(subreddit: subreddit.name, window: subreddit.window, limit: min(100, keep - posts.count), after: after)
             for post in page.children.compactMap(\.data) where seen.insert(post.id).inserted {
                 posts.append(post)
+                ranks[post.id] = posts.count
             }
             after = page.after
         } while after != nil && posts.count < keep
@@ -128,46 +131,57 @@ public actor SyncEngine {
             try db.save(renamed)
         }
 
-        // 2. Upsert, fetching comments where needed (highest scores first).
+        // 2. Upsert, fetching comments where needed (best first).
         let existing = Dictionary(uniqueKeysWithValues: try db.threads(ids: posts.map(\.id)).map { ($0.id, $0) })
-        posts.sort { $0.score > $1.score }
+        posts.sort { a, b in
+            if a.score != b.score { return a.score > b.score }
+            return (ranks[a.id] ?? .max) < (ranks[b.id] ?? .max)
+        }
         var newIDs: [String] = []
-        let needsComments = posts.filter { post in
-            let skip = post.score < settings.minimumUpvotes || (settings.hideImageAndMemePosts && post.isImageOrMeme)
+        var needsComments = posts.filter { post in
+            let lowScore = post.score >= 0 && post.score < settings.minimumUpvotes
+            let skip = lowScore || (settings.hideImageAndMemePosts && post.isImageOrMeme)
             if skip && !(existing[post.id]?.isSaved ?? false) { return false }
             guard let old = existing[post.id], let fetched = old.commentsFetchedAt else { return true }
             // A full pass also refreshes comments that are more than a day old.
             if full && Date().timeIntervalSince(fetched) > 24 * 3600 { return true }
-            return old.numComments != post.numComments
+            // Feeds don't say how many comments a thread has, so only age triggers a refresh there.
+            return post.numComments >= 0 && old.numComments != post.numComments
         }
-        let needsCommentIDs = Set(needsComments.map(\.id))
-        var completed = 0
-        eventHandler?(.progress(subredditID: subreddit.id, completed: 0, total: needsComments.count))
+        // Threads never fetched go first, so a capped pass fills gaps before refreshing.
+        if let cap = api.commentFetchesPerPass {
+            needsComments = Array((needsComments.filter { existing[$0.id]?.commentsFetchedAt == nil }
+                + needsComments.filter { existing[$0.id]?.commentsFetchedAt != nil }).prefix(cap))
+        }
 
+        // Store every post first so the library fills in before the (slower) comment requests.
+        try db.clearTopRanks(subredditID: subreddit.id)
         for post in posts {
-            try Task.checkCancellation()
             let old = existing[post.id]
             if old == nil { newIDs.append(post.id) }
-            if needsCommentIDs.contains(post.id) {
-                let response = try await api.comments(threadID: post.id, limit: settings.commentsPerThread.requestLimit)
-                let built = Self.build(post: response.post ?? post, subredditID: subreddit.id, comments: response.comments,
-                                       limit: settings.commentsPerThread.storedLimit, existing: old)
-                try db.upsert(thread: built.thread, comments: built.comments, resources: built.resources)
-                completed += 1
-                eventHandler?(.progress(subredditID: subreddit.id, completed: completed, total: needsComments.count))
-            } else {
-                // Refresh counters only; keep stored comments and resources.
-                var thread = Self.build(post: post, subredditID: subreddit.id, comments: [], limit: 0, existing: old).thread
-                if let old {
-                    thread.linkCount = max(thread.linkCount, old.linkCount)
-                    thread.maxDepth = old.maxDepth
-                    thread.commentsFetchedAt = old.commentsFetchedAt
-                    if old.kind == .resource { thread.kind = .resource }
-                }
-                try db.upsert(thread: thread, comments: nil, resources: nil)
+            var thread = Self.build(post: post, subredditID: subreddit.id, comments: [], limit: 0, existing: old, topRank: ranks[post.id]).thread
+            if let old {
+                thread.linkCount = max(thread.linkCount, old.linkCount)
+                thread.maxDepth = old.maxDepth
+                thread.commentsFetchedAt = old.commentsFetchedAt
+                if old.kind == .resource { thread.kind = .resource }
             }
+            try db.upsert(thread: thread, comments: nil, resources: nil)
         }
+        try rescore(subredditID: subreddit.id, settings: settings)
 
+        var completed = 0
+        eventHandler?(.progress(subredditID: subreddit.id, completed: 0, total: needsComments.count))
+        for post in needsComments {
+            try Task.checkCancellation()
+            let old = try db.thread(id: post.id)
+            let response = try await api.comments(threadID: post.id, limit: settings.commentsPerThread.requestLimit)
+            let built = Self.build(post: response.post ?? post, subredditID: subreddit.id, comments: response.comments,
+                                   limit: settings.commentsPerThread.storedLimit, existing: old, topRank: ranks[post.id])
+            try db.upsert(thread: built.thread, comments: built.comments, resources: built.resources)
+            completed += 1
+            eventHandler?(.progress(subredditID: subreddit.id, completed: completed, total: needsComments.count))
+        }
         // 3–4. Score and prune.
         try rescore(subredditID: subreddit.id, settings: settings)
         let removed = Set(try db.prune(subredditID: subreddit.id, keep: keep))
@@ -178,7 +192,7 @@ public actor SyncEngine {
             let globalKeys = Set(settings.boostKeywords.map { $0.lowercased() })
             accumulated.keywordMatches += fresh.filter { t in
                 t.matchedKeywords.contains { globalKeys.contains($0.lowercased()) }
-                    && t.score >= settings.minimumUpvotes
+                    && (!t.hasScore || t.score >= settings.minimumUpvotes)
             }
         }
         return surviving
@@ -194,7 +208,7 @@ public actor SyncEngine {
         let updates = rows.map { thread, bodies in
             let result = RelevanceScorer.score(
                 ScoringInput(subName: subreddit?.name ?? thread.subName, window: subreddit?.window ?? .month,
-                             score: thread.score, numComments: thread.numComments, maxReplyDepth: thread.maxDepth,
+                             score: thread.score, topRank: thread.topRank, numComments: thread.numComments, maxReplyDepth: thread.maxDepth,
                              uniqueLinkCount: thread.linkCount, title: thread.title, body: thread.body, commentBodies: bodies),
                 stats: stats, weights: settings.weights, keywords: keywords
             )
@@ -227,7 +241,7 @@ public actor SyncEngine {
                 if old?.commentsFetchedAt == nil || old?.numComments != post.numComments {
                     let response = try await api.comments(threadID: post.id, limit: settings.commentsPerThread.requestLimit)
                     var built = Self.build(post: response.post ?? post, subredditID: subID, comments: response.comments,
-                                           limit: settings.commentsPerThread.storedLimit, existing: old)
+                                           limit: settings.commentsPerThread.storedLimit, existing: old, topRank: old?.topRank)
                     built.thread.isSaved = true
                     built.thread.savedOnReddit = true
                     try db.upsert(thread: built.thread, comments: built.comments, resources: built.resources)
@@ -253,7 +267,8 @@ public actor SyncEngine {
         var resources: [Resource]
     }
 
-    static func build(post: PostDTO, subredditID: String, comments tree: [CommentDTO], limit: Int?, existing: RedditThread?) -> Built {
+    static func build(post: PostDTO, subredditID: String, comments tree: [CommentDTO], limit: Int?, existing: RedditThread?,
+                      topRank: Int? = nil) -> Built {
         var flat = tree.flatMap { $0.flattened() }.filter { $0.body != "[deleted]" && $0.body != "[removed]" }
         if let limit { flat = Array(flat.prefix(limit)) }
 
@@ -279,6 +294,11 @@ public actor SyncEngine {
         }
 
         let now = Date()
+        let fetchedComments = !(tree.isEmpty && limit == 0)
+        // Feeds carry no counts: keep what's known, and count the comments a feed returned.
+        let score = post.score >= 0 ? post.score : (existing?.score ?? -1)
+        let numComments = post.numComments >= 0 ? post.numComments
+            : fetchedComments ? comments.count : (existing?.numComments ?? 0)
         let thread = RedditThread(
             id: post.id,
             sub: subredditID,
@@ -286,11 +306,12 @@ public actor SyncEngine {
             title: post.title,
             body: post.selftext,
             author: post.author,
-            score: post.score,
-            numComments: post.numComments,
+            score: score,
+            numComments: numComments,
             createdUTC: Date(timeIntervalSince1970: post.createdUTC),
             permalink: post.permalink,
             postURL: post.externalURL ?? post.url,
+            topRank: topRank,
             kind: ThreadClassifier.classify(title: post.title, body: post.selftext, postLinks: postLinks),
             relevance: existing?.relevance ?? 0,
             why: existing?.why ?? "",
@@ -300,7 +321,7 @@ public actor SyncEngine {
             linkCount: resources.count,
             maxDepth: comments.map(\.depth).max() ?? 0,
             isImageOnly: post.isImageOrMeme,
-            commentsFetchedAt: tree.isEmpty && limit == 0 ? existing?.commentsFetchedAt : now,
+            commentsFetchedAt: fetchedComments ? now : existing?.commentsFetchedAt,
             firstSeenAt: existing?.firstSeenAt ?? now,
             updatedAt: now
         )

@@ -26,6 +26,8 @@ final class AppModel {
     let db: AppDatabase
     let secrets: SecretStore
     let client: RedditClient
+    /// The OAuth client when a client ID is set, Reddit's public feeds otherwise.
+    let api: RedditSource
     let engine: SyncEngine
     private let appTokens: AppOnlyTokenProvider
     private let userTokens: UserTokenProvider
@@ -107,7 +109,9 @@ final class AppModel {
         appTokens = AppOnlyTokenProvider(secrets: secrets, transport: transport, userAgent: userAgent)
         userTokens = UserTokenProvider(secrets: secrets, transport: transport, userAgent: userAgent)
         client = RedditClient(transport: transport, appTokens: appTokens, userTokens: userTokens, userAgent: userAgent)
-        engine = SyncEngine(db: database, api: client, settings: { box.value })
+        let feeds = RedditFeedClient(transport: transport, userAgent: userAgent)
+        api = RedditSource(oauth: client, feeds: feeds, useOAuth: { !(secrets.string(for: .clientID) ?? "").isEmpty })
+        engine = SyncEngine(db: database, api: api, settings: { box.value })
 
         connectedUsername = userTokens.isConnected ? secrets.string(for: .username) : nil
 
@@ -193,10 +197,6 @@ final class AppModel {
     }
 
     func sync(ids: [String]?, full: Bool) async {
-        guard hasClientID else {
-            lastSyncError = RedditError.missingClientID.errorDescription
-            return
-        }
         lastSyncError = nil
         isSyncing = true
         syncingIDs.formUnion(ids ?? subreddits.filter(\.isEnabled).map(\.id))
@@ -229,6 +229,8 @@ final class AppModel {
             syncProgress = 0
             syncStatus = "Syncing r/\(subreddit(id: id)?.name ?? id)…"
         case .progress(let id, let done, let total):
+            // Threads are stored before their comments are fetched, so show them as they arrive.
+            if done == 0 || done == total { reloadAll() }
             syncProgress = total > 0 ? Double(done) / Double(total) : nil
             let name = subreddit(id: id)?.name ?? id
             syncStatus = total > 0 ? "r/\(name): \(done) of \(total) threads" : "r/\(name): updating"
@@ -256,7 +258,7 @@ final class AppModel {
 
     private func schedulerTick() async {
         guard let interval = settings.syncInterval.seconds, settings.hasCompletedOnboarding,
-              hasClientID, !isSyncing else { return }
+              !isSyncing else { return }
         let enabled = subreddits.filter(\.isEnabled)
         let due = enabled.filter { Date().timeIntervalSince($0.lastSynced ?? .distantPast) >= interval }.map(\.id)
         guard !due.isEmpty else { return }
@@ -268,7 +270,7 @@ final class AppModel {
     /// Validates the format, checks `/about`, inserts the subreddit and starts its first sync.
     func addSubreddit(_ raw: String, window: TimeWindow, keywords: [String]) async throws {
         let name = try SubredditName.parseNew(raw, existing: subreddits.map(\.name)).get()
-        let about = try await client.about(subreddit: name)
+        let about = try await api.about(subreddit: name)
         if SubredditName.isDuplicate(about.displayName, in: subreddits.map(\.name)) {
             throw SubredditNameError.duplicate(about.displayName)
         }

@@ -67,7 +67,11 @@ private struct ThreadDetailContent: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             HStack(spacing: 14) {
-                Label("\(thread.score.compact) upvotes", systemImage: "arrow.up")
+                if thread.hasScore {
+                    Label("\(thread.score.compact) upvotes", systemImage: "arrow.up")
+                } else if let rank = thread.topRank {
+                    Label("#\(rank) in top posts", systemImage: "chart.bar")
+                }
                 Label("\(thread.numComments.compact) comments", systemImage: "bubble.left")
                 Label("\(thread.linkCount) links", systemImage: "link")
                 Spacer()
@@ -146,8 +150,10 @@ private struct ThreadDetailContent: View {
                     VStack(alignment: .leading, spacing: 4) {
                         HStack(spacing: 6) {
                             Text("u/\(comment.author)").fontWeight(.medium)
-                            Label(comment.score.compact, systemImage: "arrow.up")
-                                .foregroundStyle(.secondary)
+                            if comment.hasScore {
+                                Label(comment.score.compact, systemImage: "arrow.up")
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                         .font(.caption)
                         MarkdownText(markdown: comment.body)

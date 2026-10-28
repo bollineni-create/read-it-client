@@ -4,16 +4,30 @@ A native macOS app that pulls the most relevant threads and shared resources fro
 
 - SwiftUI, Swift 6, macOS 14+
 - SQLite through [GRDB](https://github.com/groue/GRDB.swift) with an FTS5 full-text index
-- Read-only Reddit OAuth API (`oauth.reddit.com`). Rounds never posts, votes or comments.
+- Reads Reddit's public feeds (`www.reddit.com/…/.rss`) with no setup, or the OAuth API (`oauth.reddit.com`) if you have an approved client ID. Rounds never posts, votes or comments.
 - The client ID and OAuth tokens live in the Keychain, never in source code or app files.
 
 ## Requirements
 
 - macOS 14 Sonoma or later
 - Xcode 16 or later (Swift 6)
-- A Reddit account, to register a free "installed app"
+- Nothing else. A Reddit API client ID is optional (see below).
 
-## 1. Register a Reddit app
+## 1. Reddit access
+
+Rounds works out of the box with Reddit's public Atom feeds. Feeds give the top 100 posts of the chosen period with their full text, plus the top comments of each thread. They don't include upvote or comment counts or the reply tree, so:
+
+- Threads are ranked by their place in Reddit's top list instead of by upvotes. The list and detail pane show `#rank` where they'd show upvotes.
+- The "hide threads under N upvotes" filter skips threads with no score.
+- Comments are stored flat, and their count is the number Rounds saved.
+- Reddit allows few anonymous requests. Each sync fetches comments for at most 30 threads per subreddit, unfetched threads first and best ranked first. Threads appear right away and later syncs fill in the rest.
+- Importing your saved posts needs the API.
+
+### Optional: API client ID
+
+Since November 2025, Reddit approves API access case by case under its [Responsible Builder Policy](https://www.reddit.com/r/redditdev/comments/1oug31u/introducing_the_responsible_builder_policy_new/). Creating an app no longer grants access on its own. If Reddit approves yours, add the client ID in onboarding or Settings → Reddit Account. Rounds then uses the API for upvote counts, reply threads and saved-post import. Clear the client ID to switch back to feeds.
+
+To register the app:
 
 1. Sign in at <https://www.reddit.com/prefs/apps>.
 2. Click **create another app…** at the bottom of the page.
@@ -63,12 +77,11 @@ This installs a background job (a launch agent) that checks GitHub at login and 
 
 Onboarding walks you through:
 
-1. Creating the installed app at reddit.com/prefs/apps
-2. Pasting the client ID. Rounds verifies it by requesting a token.
-3. Confirming the default subreddits: r/mdphd, r/medicalschool, r/medicine, r/medschool, r/mcat
-4. Running the first sync
+1. Your Reddit username for the User-Agent (optional), and an API client ID if you have an approved one (optional). Rounds verifies a client ID by requesting a token.
+2. Confirming the default subreddits: r/mdphd, r/medicalschool, r/medicine, r/medschool, r/mcat
+3. Running the first sync
 
-The first sync takes a few minutes. Reddit allows roughly 100 requests a minute, and Rounds fetches comments for each thread it keeps.
+Threads show up within a minute or two. Comments take longer: with feeds, Reddit allows only a few requests a minute, so they fill in over the next syncs. With the API, Reddit allows roughly 100 requests a minute and the first sync takes a few minutes.
 
 ## Tests
 
@@ -77,7 +90,7 @@ swift test --package-path RoundsCore          # SwiftPM, works on macOS and Linu
 xcodebuild -project Rounds.xcodeproj -scheme Rounds -destination 'platform=macOS' test
 ```
 
-The suite (50 tests) covers:
+The suite (61 tests) covers:
 
 | Area | File |
 |---|---|
@@ -86,6 +99,7 @@ The suite (50 tests) covers:
 | Link extraction, normalization, dedupe; thread classification | `LinkExtractorTests.swift` |
 | FTS5 search, filters, counts, index rebuild | `SearchTests.swift` |
 | API client against canned JSON (decoding, 429 back-off, `/about` errors, token grant) | `RedditClientTests.swift` |
+| Feed client against canned Atom (parsing, HTML to text, missing/private subreddits) and feed-mode sync (rank scoring, comment cap) | `FeedClientTests.swift` |
 | Sync engine end to end (incremental upsert, re-score, prune, saved import) | `SyncEngineTests.swift` |
 
 All network access goes through the `HTTPTransport` protocol. The tests swap in `MockTransport`, which serves fixtures from `Fixtures.swift`.
@@ -102,7 +116,8 @@ RoundsCore/              Swift package with all logic, built and tested independ
     Models.swift           Subreddit, RedditThread, Comment, Resource (GRDB records)
     AppDatabase.swift      Schema, migrations, FTS5 index, queries, maintenance
     SyncEngine.swift       Actor-based incremental syncer
-    RedditClient.swift     oauth.reddit.com client behind the RedditAPI protocol
+    RedditClient.swift     oauth.reddit.com client behind the RedditAPI protocol; RedditSource picks API or feeds
+    RedditFeedClient.swift Public Atom feeds: parsing, HTML to text, no-score posts
     RedditAuth.swift       installed_client grant, code flow, token refresh
     RateLimiter.swift      Request queue driven by X-Ratelimit-* headers
     HTTPTransport.swift    Network seam (URLSession in the app, mocks in tests)
@@ -119,8 +134,8 @@ Config/Rounds.entitlements  App Sandbox + outgoing network
 
 `SyncEngine` is an actor. Calls made while a pass is running join that pass's queue, so adding a subreddit during a sync just queues it. Each subreddit pass:
 
-1. Fetches `/r/{sub}/top?t={window}`, paginated up to the keep limit, plus `/r/{sub}/hot` (stickied posts skipped).
-2. Upserts threads by id. Comments (`/comments/{id}?sort=top&limit=N`) are fetched only for new threads, threads whose comment count changed, and, on **Sync now**, threads whose comments are more than a day old. Threads below the upvote filter or hidden as image/meme posts don't spend comment requests.
+1. Fetches `/r/{sub}/top?t={window}`, paginated up to the keep limit, plus `/r/{sub}/hot` (stickied posts skipped). Feeds return one page of up to 100. Each thread's position in the top list is stored as its rank.
+2. Upserts every thread by id first, so the library fills in before comment requests start. Comments (`/comments/{id}?sort=top&limit=N`) are fetched only for new threads, threads whose comment count changed, and, on **Sync now**, threads whose comments are more than a day old. Threads below the upvote filter or hidden as image/meme posts don't spend comment requests. Feeds have no comment count, so feed threads are refetched only by age, and at most 30 per subreddit per pass.
 3. Re-scores every thread in the subreddit, so a change in score or comment count is reflected right away.
 4. Prunes threads beyond the per-subreddit limit by relevance. Saved threads are never pruned, even after they drop out of the top list.
 
@@ -128,7 +143,7 @@ The scheduler checks once a minute and syncs subreddits that are older than the 
 
 ### Rate limiting
 
-Every request goes through `RateLimiter`. It reads `X-Ratelimit-Remaining` and `X-Ratelimit-Reset`, spaces requests across what's left of the window, and waits for the reset when the budget runs out. A 429 (or a 5xx) pauses the whole queue, honoring `Retry-After` and otherwise backing off exponentially (2s, 4s, 8s, 16s) before giving up. A 401 refreshes the token once.
+Every request goes through `RateLimiter` (the feed client has its own). It reads `X-Ratelimit-Remaining` and `X-Ratelimit-Reset`, spaces requests across what's left of the window, and waits for the reset when the budget runs out. A 429 (or a 5xx) pauses the whole queue, honoring `Retry-After` and otherwise backing off exponentially (2s, 4s, 8s, 16s) before giving up. A 401 refreshes the token once.
 
 Requests send a descriptive User-Agent, `macos:com.naren.rounds:v1.0 (by /u/<username>)`. Set your username in onboarding or Settings → Reddit Account.
 
@@ -138,7 +153,7 @@ A weighted mix of four normalized signals. The weights are adjustable in Setting
 
 | Signal | Computation |
 |---|---|
-| Upvotes | `log(1+score) / log(1+max score in the subreddit)` |
+| Upvotes | `log(1+score) / log(1+max score in the subreddit)`. Without scores (feeds): `1 − (rank−1) / deepest rank in the subreddit` |
 | Discussion | `0.7 × log-normalized comment count + 0.3 × min(reply depth, 5)/5` |
 | Resources | `min(unique external links in post + comments, 4) / 4` |
 | Keywords | `1 − 0.4^matches`, using global plus per-subreddit keywords matched as whole words (case-insensitive) in the title, body and comments |
@@ -173,7 +188,7 @@ A single FTS5 table (`porter unicode61` tokenizer) has one row per thread, cover
 
 - Same model as the Mac app: subreddits with a time window, kinds and keywords; relevance scoring with the same weights; resources pulled from posts and comments; Saved threads that are never pruned.
 - Data stays in the browser (IndexedDB). Search is a BM25 index over titles, bodies, comments and resources, built in memory.
-- Reddit access is read-only. Hosted on the launcher, `/rounds/api/*` is a server route that uses Reddit's OAuth API (installed-client grant) when `REDDIT_CLIENT_ID` is set there. Without it, or when the page runs on its own, Rounds reads Reddit's public JSON straight from the browser and falls back to the server route when Reddit refuses the browser.
+- Reddit access is read-only. Hosted on the launcher, `/rounds/api/*` is a server route that uses Reddit's OAuth API (installed-client grant) when `REDDIT_CLIENT_ID` is set there. Without it, or when the page runs on its own, Rounds reads Reddit's public JSON straight from the browser and falls back to the server route when Reddit refuses the browser. Reddit now refuses anonymous JSON, and its RSS feeds can't be read cross-origin, so without an approved client ID the web version needs the server route to read the feeds instead.
 - A sync fetches comments for at most 30 threads per subreddit, to stay within Reddit's limits; later syncs fill in the rest.
 - Layout: three panes on wide screens; on narrow ones (phones, a folded Surface Duo) the subreddits move into a drawer and the list and thread stack with a back button.
 

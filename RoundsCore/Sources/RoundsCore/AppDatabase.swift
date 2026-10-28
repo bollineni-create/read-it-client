@@ -155,6 +155,11 @@ public final class AppDatabase: Sendable {
                 )
                 """)
         }
+        migrator.registerMigration("v2-topRank") { db in
+            try db.alter(table: "thread") { t in
+                t.add(column: "topRank", .integer)
+            }
+        }
         return migrator
     }
 
@@ -241,7 +246,8 @@ public final class AppDatabase: Sendable {
             case .relevance:
                 sql += match != nil ? " ORDER BY bm25(thread_fts, 0, 10, 4, 1, 2) - thread.relevance / 20.0" : " ORDER BY thread.relevance DESC"
             case .top:
-                sql += " ORDER BY thread.score DESC"
+                // Feed threads have no score (-1); their top-listing rank orders them.
+                sql += " ORDER BY thread.score DESC, thread.topRank IS NULL, thread.topRank"
             case .discussed:
                 sql += " ORDER BY thread.numComments DESC"
             }
@@ -309,7 +315,7 @@ public final class AppDatabase: Sendable {
         var hidden: [String] = []
         var args: StatementArguments = []
         if query.minimumUpvotes > 0 {
-            hidden.append("thread.score < ?")
+            hidden.append("(thread.score >= 0 AND thread.score < ?)")
             args += [query.minimumUpvotes]
         }
         if query.hideImageAndMemePosts {
@@ -379,6 +385,13 @@ public final class AppDatabase: Sendable {
         }
     }
 
+    /// Forgets top-listing ranks before a sync records the current ones.
+    public func clearTopRanks(subredditID: String) throws {
+        try writer.write { db in
+            try db.execute(sql: "UPDATE thread SET topRank = NULL WHERE sub = ?", arguments: [subredditID.lowercased()])
+        }
+    }
+
     public func updateScores(_ updates: [(id: String, relevance: Double, why: String, matched: [String])]) throws {
         try writer.write { db in
             for u in updates {
@@ -406,8 +419,8 @@ public final class AppDatabase: Sendable {
 
     public func subredditStats(subredditID: String) throws -> SubredditStats {
         try writer.read { db in
-            let row = try Row.fetchOne(db, sql: "SELECT MAX(score) AS s, MAX(numComments) AS c FROM thread WHERE sub = ?", arguments: [subredditID.lowercased()])
-            return SubredditStats(maxScore: row?["s"] ?? 0, maxComments: row?["c"] ?? 0)
+            let row = try Row.fetchOne(db, sql: "SELECT MAX(score) AS s, MAX(numComments) AS c, MAX(topRank) AS r FROM thread WHERE sub = ?", arguments: [subredditID.lowercased()])
+            return SubredditStats(maxScore: row?["s"] ?? 0, maxComments: row?["c"] ?? 0, maxRank: row?["r"] ?? 0)
         }
     }
 
