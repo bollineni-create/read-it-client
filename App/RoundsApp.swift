@@ -14,6 +14,11 @@ struct RoundsApp: App {
                 .tint(.roundsTeal)
         }
         .commands {
+            // Our own Quit, so ⌘Q still works while a sheet (like the undismissable onboarding) is up.
+            CommandGroup(replacing: .appTermination) {
+                Button("Quit Rounds") { AppDelegate.quit() }
+                    .keyboardShortcut("q")
+            }
             CommandGroup(after: .newItem) {
                 Button("Add Subreddit…") { model.showAddSubreddit = true }
                     .keyboardShortcut("n", modifiers: [.command, .shift])
@@ -52,6 +57,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         !SettingsStore().load().syncFromMenuBar
     }
+
+    /// Covers ⌘Q, the Dock menu and the auto-updater's AppleScript `quit`: an open sheet must never hold the app.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        Self.endSheets()
+        return .terminateNow
+    }
+
+    @MainActor static func quit() {
+        endSheets()
+        NSApplication.shared.terminate(nil)
+    }
+
+    @MainActor private static func endSheets() {
+        for window in NSApplication.shared.windows {
+            for sheet in window.sheets { window.endSheet(sheet) }
+        }
+    }
 }
 
 /// A view, not inline in `commands`, so `isSyncing` changes refresh this item instead of the whole app body.
@@ -89,7 +111,6 @@ struct MenuBarView: View {
             Text("Settings…")
         }
         Divider()
-        Button("Quit Rounds") { NSApplication.shared.terminate(nil) }
-            .keyboardShortcut("q")
+        Button("Quit Rounds") { AppDelegate.quit() }
     }
 }
