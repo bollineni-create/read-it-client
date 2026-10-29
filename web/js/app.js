@@ -499,6 +499,20 @@ function wire() {
   for (const k of Object.keys(DEFAULT_SETTINGS.weights)) $(`#w-${k}`).addEventListener('input', (e) => { $(`#w-${k}-v`).textContent = Math.round(e.target.value * 100); });
   $('#sort').addEventListener('change', (e) => { ui.sort = e.target.value; renderList(); });
   let searchTimer;
+  // Show the longest search hint that fits, so narrow screens (a phone, the folded iPhone Duo)
+  // don't cut it off mid-word.
+  (() => {
+    const input = $('#search'), hints = [input.placeholder, ...input.dataset.placeholders.split('|')];
+    const ctx = document.createElement('canvas').getContext('2d');
+    const fit = () => {
+      const cs = getComputedStyle(input), room = input.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+      if (room <= 0) return;
+      ctx.font = cs.font;
+      input.placeholder = hints.find((t) => ctx.measureText(t).width <= room) || hints[hints.length - 1];
+    };
+    if ('ResizeObserver' in window) new ResizeObserver(fit).observe(input); else addEventListener('resize', fit);
+    fit();
+  })();
   $('#search').addEventListener('input', (e) => {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => { ui.query = e.target.value; renderList(); }, 120);
