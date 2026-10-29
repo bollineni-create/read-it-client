@@ -196,8 +196,9 @@ input[type=checkbox], input[type=range] { accent-color: var(--accent); }
   .brand span { display: none; }
   .menu { display: grid; }
   .sidebar { position: fixed; z-index: 10; top: 0; bottom: 0; left: 0; width: min(280px, 86vw); padding-top: calc(12px + env(safe-area-inset-top));
-    transform: translateX(-100%); transition: transform 0.22s ease; box-shadow: var(--shadow); }
-  .drawer-open .sidebar { transform: none; }
+    transform: translateX(-100%); transition: transform 0.22s ease, visibility 0s 0.22s; visibility: hidden; }
+  /* The shadow only while open: a closed drawer's shadow bled onto the left edge of the list. */
+  .drawer-open .sidebar { transform: none; visibility: visible; box-shadow: var(--shadow); transition: transform 0.22s ease; }
   .drawer-open .scrim { display: block; position: fixed; inset: 0; z-index: 9; background: rgba(0, 0, 0, 0.3); }
   .side-row .edit-sub { opacity: 1; }
 }
