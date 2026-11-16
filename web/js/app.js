@@ -225,6 +225,9 @@ async function renderList() {
     return list;
   }
   const now = Date.now();
+  // The list is rebuilt while comments load in the background. The browser keeps the scroll position;
+  // the focused row has to be put back by hand, or a keyboard reader is thrown out of the list.
+  const focused = document.activeElement?.closest?.('#threads .row')?.dataset.id;
   el.innerHTML = list.slice(0, 400).map((t) => {
     const sub = subById(t.sub);
     return `<button class="row${ui.selected === t.id ? ' selected' : ''}" data-id="${t.id}">
@@ -233,6 +236,7 @@ async function renderList() {
       <div class="row-stats">${statsHTML(t, 'span', true)}${t.linkCount ? `<span title="Links">🔗 ${t.linkCount}</span>` : ''}<span class="rel" title="Relevance">${t.relevance.toFixed(0)}</span></div>
     </button>`;
   }).join('');
+  if (focused) [...el.querySelectorAll('.row')].find((row) => row.dataset.id === focused)?.focus({ preventScroll: true });
   return list;
 }
 

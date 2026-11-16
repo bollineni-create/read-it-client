@@ -8,6 +8,7 @@
 const Reddit = (() => {
   let mode = null; // 'server' (the route answers everything), 'hybrid' (browser first, then the route), 'direct'
   let feeds = false; // the route reads feeds: no counts, and Reddit allows only a few requests a minute
+  let cachedOnly = false; // the route answers a cached-only request without asking Reddit
 
   async function detect() {
     if (mode) return mode;
@@ -15,6 +16,7 @@ const Reddit = (() => {
       const r = await fetch('api/status', { headers: { accept: 'application/json' } });
       const j = r.ok && (r.headers.get('content-type') || '').includes('json') ? await r.json() : null;
       feeds = !!(j && j.rounds && j.feeds);
+      cachedOnly = feeds && !!j.cachedOnly;
       mode = j && j.rounds ? (j.oauth || j.feeds ? 'server' : 'hybrid') : 'direct';
     } catch { mode = 'direct'; }
     return mode;
@@ -63,6 +65,8 @@ const Reddit = (() => {
   // The site keeps answers at its edge for hours and shares them between visitors, and an answer
   // from there costs Reddit nothing. So while the page would have to wait, it first asks for the
   // answer "only if the edge has it" (X-Rounds-Cached-Only), and waits only when it doesn't.
+  // It asks that way only when the route says it understands (`cachedOnly` in its status), since a route
+  // that doesn't would pass the question on to Reddit. Only an answer the edge marks as its own is free.
   const MIN_SPACING = 1000;
   const MARGIN = 500; // past the moment Reddit says its budget refills
   const MAX_RETRIES = 4;
@@ -96,13 +100,30 @@ const Reddit = (() => {
     if (reset != null) budget.resetAt = now + reset * 1000 + MARGIN;
   }
 
+  /**
+   * Takes in an answer that reached Reddit. Returns true when it is final, and false when Reddit
+   * refused or failed and the request should go again after the pause this sets.
+   */
+  function settled(r, attempt) {
+    learnBudget(r);
+    if ((r.status !== 429 && r.status < 500) || attempt >= MAX_RETRIES) return true;
+    const told = num(r.headers.get('retry-after')) ?? num(r.headers.get('x-reddit-reset'));
+    budget.pausedUntil = Date.now() + Math.min(told != null ? told * 1000 + MARGIN : BACKOFF * 2 ** attempt, LONGEST_WAIT);
+    return false;
+  }
+
   async function feedRequest(url) {
     const headers = { accept: 'application/json' };
     for (let attempt = 0; ; attempt++) {
       let wait = waitForReddit();
-      if (wait > MIN_SPACING) {
+      if (wait > MIN_SPACING && cachedOnly) {
         const held = await fetch(url, { headers: { ...headers, 'x-rounds-cached-only': '1' } }).catch(() => null);
-        if (held && held.status === 200) return held;
+        if (held && held.status === 200) {
+          // Free only when the edge marks the answer as its own copy. Any other 200 reached Reddit: it
+          // counts against the budget, and the page stops asking this way.
+          if (!fromEdge(held)) { learnBudget(held); cachedOnly = false; }
+          return held;
+        }
         wait = waitForReddit();
       }
       if (wait > 0) {
@@ -111,10 +132,7 @@ const Reddit = (() => {
         onWait(0);
       }
       const r = await fetch(url, { headers });
-      learnBudget(r);
-      if ((r.status !== 429 && r.status < 500) || attempt >= MAX_RETRIES) return r;
-      const told = num(r.headers.get('retry-after')) ?? num(r.headers.get('x-reddit-reset'));
-      budget.pausedUntil = Date.now() + Math.min(told != null ? told * 1000 + MARGIN : BACKOFF * 2 ** attempt, LONGEST_WAIT);
+      if (settled(r, attempt)) return r;
     }
   }
 

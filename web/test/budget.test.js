@@ -15,8 +15,9 @@ const LISTING = { data: { children: [], after: null } };
 /**
  * Loads reddit.js against a clock the test moves by hand and a `fetch` it answers.
  * `answer(call)` gets `{ url, cachedOnly, at }` and returns `{ status, headers, body }`.
+ * `cachedOnly` is whether the route's status says it answers cached-only requests itself.
  */
-function load(answer) {
+function load(answer, { cachedOnly = true } = {}) {
   let now = 1_000_000;
   const timers = [];
   const calls = [];
@@ -30,7 +31,7 @@ function load(answer) {
     Date: { now: () => now },
     setTimeout: (fn, ms) => { timers.push({ at: now + Math.max(0, ms), fn }); },
     fetch: async (url, init = {}) => {
-      if (url === 'api/status') return reply({ headers: { 'content-type': 'application/json' }, body: { rounds: true, feeds: true } });
+      if (url === 'api/status') return reply({ headers: { 'content-type': 'application/json' }, body: { rounds: true, feeds: true, cachedOnly } });
       const call = { url, cachedOnly: !!(init.headers && init.headers['x-rounds-cached-only']), at: now - 1_000_000 };
       calls.push(call);
       return reply(answer(call));
@@ -113,4 +114,25 @@ test('a request Reddit keeps refusing gives up and says why', async () => {
   const { error } = await h.settle(h.Reddit.top('mdphd', 'month', 100));
   assert.equal(error?.status, 429);
   assert.equal(h.real().length, 5, 'one try and four retries');
+});
+
+test("a route that doesn't say it answers cached-only requests is never asked that way", async () => {
+  const h = load(() => ({ headers: spent(30) }), { cachedOnly: false });
+  await h.Reddit.detect();
+  await h.settle(Promise.all([h.Reddit.top('mdphd', 'month', 100), h.Reddit.hot('mdphd', 50)]));
+  assert.deepEqual(h.calls.map((c) => c.cachedOnly), [false, false]);
+  assert.ok(h.calls[1].at >= 30_000, `second request went after ${h.calls[1].at} ms`);
+});
+
+test("a cached-only answer that isn't the edge's own counts against the budget, and the page stops asking that way", async () => {
+  // The route said it answers cached-only requests, then passed one on to Reddit anyway.
+  const h = load(() => ({ headers: spent(30) }));
+  await h.Reddit.detect();
+  await h.settle(h.Reddit.top('mdphd', 'month', 100));
+  await h.settle(h.Reddit.hot('mdphd', 50));
+  assert.deepEqual(h.calls.map((c) => [c.cachedOnly, c.at]), [[false, 0], [true, 0]]);
+  await h.settle(h.Reddit.top('mcat', 'month', 100));
+  assert.equal(h.calls.length, 3);
+  assert.equal(h.calls[2].cachedOnly, false);
+  assert.ok(h.calls[2].at >= 30_000, `the next request went after ${h.calls[2].at} ms`);
 });
