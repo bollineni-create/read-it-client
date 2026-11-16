@@ -54,32 +54,80 @@ const Reddit = (() => {
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  // Feed requests go out one at a time, a second apart, like the Mac app's. They queue, so a
-  // sync and a "Load comments" tap at the same moment still reach Reddit in turn. An answer the
-  // site already had cached never reached Reddit, so the next request doesn't wait for it.
-  const FEED_SPACING = 1000;
-  let nextFeedRequest = 0;
+  // MARK: Feeds
+  //
+  // Reddit allows an address about one feed request a minute, and says so on every answer: how
+  // many requests are left and the seconds until that refills. The server route passes both on
+  // (X-Reddit-Remaining, X-Reddit-Reset; Retry-After on a 429). Like the Mac app's RateLimiter,
+  // the page keeps to that budget: requests go out one at a time and wait for Reddit to be ready.
+  // The site keeps answers at its edge for hours and shares them between visitors, and an answer
+  // from there costs Reddit nothing. So while the page would have to wait, it first asks for the
+  // answer "only if the edge has it" (X-Rounds-Cached-Only), and waits only when it doesn't.
+  const MIN_SPACING = 1000;
+  const MARGIN = 500; // past the moment Reddit says its budget refills
+  const MAX_RETRIES = 4;
+  const BACKOFF = 5000; // doubled on each retry when Reddit gives no time to wait
+  const LONGEST_WAIT = 90000;
+  const budget = { remaining: null, resetAt: 0, lastAt: 0, pausedUntil: 0 };
   let feedQueue = Promise.resolve();
+  let onWait = () => {};
 
-  function spaced(send) {
-    const turn = feedQueue.then(async () => {
-      await sleep(Math.max(0, nextFeedRequest - Date.now()));
-      try {
-        const r = await send();
-        nextFeedRequest = r.headers.get('x-vercel-cache') === 'HIT' ? 0 : Date.now() + FEED_SPACING;
-        return r;
-      } catch (e) {
-        nextFeedRequest = Date.now() + FEED_SPACING;
-        throw e;
+  const num = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
+  const fromEdge = (r) => ['HIT', 'STALE', 'REVALIDATED'].includes(r.headers.get('x-vercel-cache'));
+
+  /** Milliseconds until Reddit will take another request, as far as the page knows. */
+  function waitForReddit(now = Date.now()) {
+    let at = Math.max(now, budget.lastAt + MIN_SPACING, budget.pausedUntil);
+    if (budget.remaining != null && budget.resetAt > now) {
+      if (budget.remaining < 1) at = Math.max(at, budget.resetAt);
+      // Spread what's left of the budget over the time left before it refills.
+      else at = Math.max(at, budget.lastAt + (budget.resetAt - now) / budget.remaining);
+    }
+    return at - now;
+  }
+
+  /** What an answer that came from Reddit just now says about the budget. */
+  function learnBudget(r, now = Date.now()) {
+    if (fromEdge(r)) return;
+    budget.lastAt = now;
+    const remaining = num(r.headers.get('x-reddit-remaining'));
+    const reset = num(r.headers.get('x-reddit-reset'));
+    if (remaining != null) budget.remaining = remaining;
+    if (reset != null) budget.resetAt = now + reset * 1000 + MARGIN;
+  }
+
+  async function feedRequest(url) {
+    const headers = { accept: 'application/json' };
+    for (let attempt = 0; ; attempt++) {
+      let wait = waitForReddit();
+      if (wait > MIN_SPACING) {
+        const held = await fetch(url, { headers: { ...headers, 'x-rounds-cached-only': '1' } }).catch(() => null);
+        if (held && held.status === 200) return held;
+        wait = waitForReddit();
       }
-    });
+      if (wait > 0) {
+        onWait(wait);
+        await sleep(wait);
+        onWait(0);
+      }
+      const r = await fetch(url, { headers });
+      learnBudget(r);
+      if ((r.status !== 429 && r.status < 500) || attempt >= MAX_RETRIES) return r;
+      const told = num(r.headers.get('retry-after')) ?? num(r.headers.get('x-reddit-reset'));
+      budget.pausedUntil = Date.now() + Math.min(told != null ? told * 1000 + MARGIN : BACKOFF * 2 ** attempt, LONGEST_WAIT);
+    }
+  }
+
+  /** Feed requests queue, so a sync and a "Load comments" tap at the same moment still go out in turn. */
+  function inTurn(url) {
+    const turn = feedQueue.then(() => feedRequest(url));
     feedQueue = turn.catch(() => {});
     return turn;
   }
 
   async function server(route, p) {
-    const send = () => fetch(`api/${route}?${qs(p)}`, { headers: { accept: 'application/json' } });
-    const r = await (feeds ? spaced(send) : send());
+    const url = `api/${route}?${qs(p)}`;
+    const r = await (feeds ? inTurn(url) : fetch(url, { headers: { accept: 'application/json' } }));
     const body = await r.json().catch(() => null);
     if (!r.ok) throw errorFor(r.status, route, p, body);
     return body;
@@ -96,7 +144,8 @@ const Reddit = (() => {
           return await server(route, p); // CORS failures and 403/429 from the browser
         }
       } catch (e) {
-        if ((e.status === 429 || e.status >= 500) && attempt < 2) { await sleep(1500 * (attempt + 1)); continue; }
+        // A feed request has already waited and retried on Reddit's own schedule.
+        if (!feeds && (e.status === 429 || e.status >= 500) && attempt < 2) { await sleep(1500 * (attempt + 1)); continue; }
         if (e instanceof RedditError) throw e;
         throw new RedditError("Couldn't reach Reddit. Check your connection.", 0);
       }
@@ -107,6 +156,8 @@ const Reddit = (() => {
     detect,
     get mode() { return mode; },
     get feeds() { return feeds; },
+    /** Called with the milliseconds a feed request is about to wait for Reddit, then with 0 when it goes. */
+    set onWait(fn) { onWait = typeof fn === 'function' ? fn : () => {}; },
     top: (sub, t, limit, after) => get('top', { sub, t, limit, after }).then(parseListing),
     hot: (sub, limit) => get('hot', { sub, limit }).then(parseListing),
     comments: (id, limit) => get('comments', { id, limit }).then(parseComments),
