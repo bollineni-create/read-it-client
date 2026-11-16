@@ -1,18 +1,21 @@
-// Read-only Reddit access. On the hosted launcher, /rounds/api/* is a server route that
-// uses Reddit's OAuth API when REDDIT_CLIENT_ID is set there. Without it (or when this page
-// runs on its own), Rounds reads Reddit's public JSON straight from the browser and falls back
-// to the server route when Reddit refuses the browser.
+// Read-only Reddit access. On the hosted launcher, /rounds/api/* is a server route. It uses
+// Reddit's OAuth API when REDDIT_CLIENT_ID is set there, and Reddit's public feeds when it
+// isn't. Feeds carry no upvote or comment counts and no reply tree: posts come back with a
+// score of -1 and are ranked by their place in the top listing instead (see core.js).
+// When this page runs on its own, with no server route, it asks Reddit straight from the browser.
 'use strict';
 
 const Reddit = (() => {
-  let mode = null; // 'server' (OAuth on the server), 'hybrid' (browser first, then server), 'direct'
+  let mode = null; // 'server' (the route answers everything), 'hybrid' (browser first, then the route), 'direct'
+  let feeds = false; // the route reads feeds: no counts, and Reddit allows only a few requests a minute
 
   async function detect() {
     if (mode) return mode;
     try {
       const r = await fetch('api/status', { headers: { accept: 'application/json' } });
       const j = r.ok && (r.headers.get('content-type') || '').includes('json') ? await r.json() : null;
-      mode = j && j.rounds ? (j.oauth ? 'server' : 'hybrid') : 'direct';
+      feeds = !!(j && j.rounds && j.feeds);
+      mode = j && j.rounds ? (j.oauth || j.feeds ? 'server' : 'hybrid') : 'direct';
     } catch { mode = 'direct'; }
     return mode;
   }
@@ -49,14 +52,21 @@ const Reddit = (() => {
     return body;
   }
 
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  // Feed requests are spaced a second apart, like the Mac app's. An answer the site already
+  // had cached never reached Reddit, so the next request doesn't wait for it.
+  const FEED_SPACING = 1000;
+  let nextFeedRequest = 0;
+
   async function server(route, p) {
+    if (feeds) await sleep(Math.max(0, nextFeedRequest - Date.now()));
     const r = await fetch(`api/${route}?${qs(p)}`, { headers: { accept: 'application/json' } });
+    if (feeds) nextFeedRequest = r.headers.get('x-vercel-cache') === 'HIT' ? 0 : Date.now() + FEED_SPACING;
     const body = await r.json().catch(() => null);
     if (!r.ok) throw errorFor(r.status, route, p, body);
     return body;
   }
-
-  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   async function get(route, p) {
     const m = await detect();
@@ -79,6 +89,7 @@ const Reddit = (() => {
   return {
     detect,
     get mode() { return mode; },
+    get feeds() { return feeds; },
     top: (sub, t, limit, after) => get('top', { sub, t, limit, after }).then(parseListing),
     hot: (sub, limit) => get('hot', { sub, limit }).then(parseListing),
     comments: (id, limit) => get('comments', { id, limit }).then(parseComments),
