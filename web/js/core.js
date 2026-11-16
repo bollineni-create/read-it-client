@@ -281,11 +281,22 @@ function isImageOrMeme(p) {
 
 const externalURL = (p) => (!p.isSelf && p.url && p.url.startsWith('http') && !isRedditURL(p.url) ? p.url : null);
 
+/** A stored thread as a post, for rebuilding it when Reddit sends its comments without the post. */
+function postFromThread(t, countsUnknown) {
+  return {
+    id: t.id, subreddit: t.subName, title: t.title, selftext: t.body, author: t.author,
+    score: t.score, numComments: countsUnknown ? -1 : t.numComments, createdUTC: t.createdUTC / 1000,
+    permalink: t.permalink, url: t.postURL || null, postHint: null,
+    isSelf: !t.postURL || isRedditURL(t.postURL), isGallery: false, isVideo: false, flair: null, stickied: false, over18: false,
+  };
+}
+
 /**
  * Builds a thread record, its comments and resources. `limit` null keeps every comment;
- * `tree` empty with limit 0 means a counters-only refresh.
+ * `tree` empty with limit 0 means a counters-only refresh. `topRank` is the post's place in
+ * the subreddit's top listing, which stands in for a score feeds don't carry.
  */
-function buildThread(post, subID, tree, limit, existing) {
+function buildThread(post, subID, tree, limit, existing, topRank = null) {
   let flat = tree.flatMap(flatten).filter((c) => c.body !== '[deleted]' && c.body !== '[removed]');
   if (limit != null) flat = flat.slice(0, limit);
   const comments = flat.map((c, i) => ({ id: c.id, author: c.author, body: c.body, score: c.score, depth: c.depth, position: i }));
@@ -299,14 +310,18 @@ function buildThread(post, subID, tree, limit, existing) {
   for (const c of flat) for (const l of extractLinks(c.body)) if (!seen.has(l.url)) { seen.add(l.url); resources.push({ ...l, sourceCommentId: c.id }); }
 
   const now = Date.now();
+  const fetchedComments = !(!tree.length && limit === 0);
+  // Feeds carry no counts (-1): keep what's known, and count the comments a feed returned.
+  const score = post.score >= 0 ? post.score : existing?.score ?? -1;
+  const numComments = post.numComments >= 0 ? post.numComments : fetchedComments ? comments.length : existing?.numComments ?? 0;
   const thread = {
     id: post.id, sub: subID, subName: post.subreddit, title: post.title, body: post.selftext, author: post.author,
-    score: post.score, numComments: post.numComments, createdUTC: post.createdUTC * 1000, permalink: post.permalink,
+    score, numComments, topRank, createdUTC: post.createdUTC * 1000, permalink: post.permalink,
     postURL: ext || post.url, kind: classify(post.title, postLinks),
     relevance: existing?.relevance ?? 0, why: existing?.why ?? '', matchedKeywords: existing?.matchedKeywords ?? [],
     isSaved: existing?.isSaved ?? false, savedOnReddit: existing?.savedOnReddit ?? false, linkCount: resources.length,
     maxDepth: comments.reduce((m, c) => Math.max(m, c.depth), 0), isImageOnly: isImageOrMeme(post),
-    commentsFetchedAt: !tree.length && limit === 0 ? existing?.commentsFetchedAt ?? null : now,
+    commentsFetchedAt: fetchedComments ? now : existing?.commentsFetchedAt ?? null,
     firstSeenAt: existing?.firstSeenAt ?? now, updatedAt: now,
   };
   return { thread, comments, resources };
@@ -315,6 +330,8 @@ function buildThread(post, subID, tree, limit, existing) {
 // MARK: Scoring
 
 const logNorm = (v, max) => { v = Math.max(v, 0); const m = Math.max(max, v, 0); return m > 0 ? Math.log1p(v) / Math.log1p(m) : 0; };
+/** Without upvote counts, a thread's place in the top listing stands in: #1 scores 1, the last one close to 0. */
+const rankSignal = (rank, maxRank) => (rank >= 1 ? 1 - (rank - 1) / Math.max(maxRank || 0, rank) : 0);
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 function matchKeywords(keywords, texts) {
@@ -335,7 +352,7 @@ function compact(n) {
 }
 
 function scoreThread(t, commentBodies, sub, stats, weights, keywords) {
-  const up = logNorm(t.score, stats.maxScore);
+  const up = t.score >= 0 ? logNorm(t.score, stats.maxScore) : rankSignal(t.topRank, stats.maxRank);
   const comments = logNorm(t.numComments, stats.maxComments);
   const depth = Math.min(Math.max(t.maxDepth, 0), 5) / 5;
   const discussion = 0.7 * comments + 0.3 * depth;
@@ -359,7 +376,7 @@ function scoreThread(t, commentBodies, sub, stats, weights, keywords) {
     else parts.push(t.linkCount === 1 ? `Shares a resource in ${subName}` : `Shares ${t.linkCount} resources in ${subName}`);
     if (ranked.length > 1 && ranked[1][1] >= lead[1] * 0.6) {
       const s = ranked[1][0];
-      if (s === 'upvotes') parts.push(`${compact(t.score)} upvotes`);
+      if (s === 'upvotes') { if (t.score >= 0) parts.push(`${compact(t.score)} upvotes`); else if (t.topRank) parts.push(`#${t.topRank} of the top posts`); }
       else if (s === 'discussion') parts.push(`${compact(t.numComments)} comments`);
       else if (t.linkCount > 0) parts.push(t.linkCount === 1 ? '1 link shared' : `${t.linkCount} links shared`);
     }
@@ -419,5 +436,5 @@ function shortAge(ms, now = Date.now()) {
 
 if (typeof module !== 'undefined') {
   module.exports = { extractLinks, normalizeURL, classify, isQuestion, parseSubredditName, parseListing, parseComments,
-    buildThread, scoreThread, matchKeywords, searchScores, tokenize, isImageOrMeme, compact, shortAge, decodeEntities };
+    buildThread, postFromThread, scoreThread, rankSignal, matchKeywords, searchScores, tokenize, isImageOrMeme, compact, shortAge, decodeEntities };
 }

@@ -95,7 +95,8 @@ function passesFilters(t) {
   if (t.isSaved) return true;
   const sub = subById(t.sub);
   if (sub && !sub.includeKinds.includes(t.kind)) return false;
-  if (t.score < store.settings.minimumUpvotes) return false;
+  // A score of -1 is a thread from Reddit's feeds, which don't carry upvote counts; the minimum can't apply to it.
+  if (t.score >= 0 && t.score < store.settings.minimumUpvotes) return false;
   if (store.settings.hideImageAndMemePosts && t.isImageOnly) return false;
   return true;
 }
@@ -131,7 +132,7 @@ async function visibleThreads() {
     if (scores) list = list.filter((t) => scores.has(t.id));
   }
   const tie = (a, b) => b.createdUTC - a.createdUTC;
-  if (ui.sort === 'top') list.sort((a, b) => b.score - a.score || tie(a, b));
+  if (ui.sort === 'top') list.sort((a, b) => b.score - a.score || (a.topRank || 1e9) - (b.topRank || 1e9) || tie(a, b));
   else if (ui.sort === 'discussed') list.sort((a, b) => b.numComments - a.numComments || tie(a, b));
   else if (scores) list.sort((a, b) => (scores.get(b.id) + b.relevance / 20) - (scores.get(a.id) + a.relevance / 20) || tie(a, b));
   else list.sort((a, b) => b.relevance - a.relevance || tie(a, b));
@@ -179,8 +180,20 @@ function renderSidebar() {
 function syncLine() {
   if (ui.syncing) return ui.progress || 'Syncing…';
   const last = Math.max(0, ...store.subs.map((s) => s.lastSynced || 0));
-  const mode = Reddit.mode === 'server' ? ' · Reddit API' : '';
+  const mode = Reddit.mode === 'server' && !Reddit.feeds ? ' · Reddit API' : '';
   return last ? (Date.now() - last < 60e3 ? `Synced just now${mode}` : `Synced ${shortAge(last)} ago${mode}`) : 'Not synced yet';
+}
+
+/**
+ * Upvotes and comments for a thread. Reddit's feeds don't carry either count: such a thread shows
+ * its place in the subreddit's top posts instead, and no comment count until its comments are in.
+ */
+function statsHTML(t, tag, short) {
+  const el = tag.split(' ')[0];
+  const votes = t.score >= 0 ? `<${tag} title="Upvotes">↑ ${fmtNum(t.score)}</${el}>`
+    : t.topRank ? `<${tag} title="Place in the subreddit's top posts">#${t.topRank}${short ? '' : ' in top posts'}</${el}>` : '';
+  const comments = t.score >= 0 || t.commentsFetchedAt ? `<${tag} title="Comments">💬 ${fmtNum(t.numComments)}</${el}>` : '';
+  return votes + comments;
 }
 
 async function renderList() {
@@ -199,7 +212,7 @@ async function renderList() {
     return `<button class="row${ui.selected === t.id ? ' selected' : ''}" data-id="${t.id}">
       <div class="row-meta"><span class="dot" style="background:${sub?.colorHex || '#888'}"></span>r/${esc(sub?.name || t.subName)} · ${KINDS[t.kind]} · ${shortAge(t.createdUTC, now)}${t.isSaved ? ' · <span class="saved-mark">Saved</span>' : ''}</div>
       <div class="row-title">${esc(t.title)}</div>
-      <div class="row-stats"><span title="Upvotes">↑ ${fmtNum(t.score)}</span><span title="Comments">💬 ${fmtNum(t.numComments)}</span>${t.linkCount ? `<span title="Links">🔗 ${t.linkCount}</span>` : ''}<span class="rel" title="Relevance">${t.relevance.toFixed(0)}</span></div>
+      <div class="row-stats">${statsHTML(t, 'span', true)}${t.linkCount ? `<span title="Links">🔗 ${t.linkCount}</span>` : ''}<span class="rel" title="Relevance">${t.relevance.toFixed(0)}</span></div>
     </button>`;
   }).join('');
   return list;
@@ -238,7 +251,7 @@ async function renderDetail() {
       <div class="d-meta"><span class="dot" style="background:${sub?.colorHex || '#888'}"></span>r/${esc(sub?.name || t.subName)} · ${KINDS[t.kind]} · u/${esc(t.author)} · ${date}</div>
       <h1 class="d-title">${esc(t.title)}</h1>
       <div class="d-actions">
-        <span class="stat">↑ ${fmtNum(t.score)}</span><span class="stat">💬 ${fmtNum(t.numComments)}</span>${t.linkCount ? `<span class="stat">🔗 ${t.linkCount}</span>` : ''}
+        ${statsHTML(t, 'span class="stat"', false)}${t.linkCount ? `<span class="stat">🔗 ${t.linkCount}</span>` : ''}
         <span class="spacer"></span>
         <a class="btn ghost" href="${esc(redditURL)}" target="_blank" rel="noopener noreferrer">Open on Reddit</a>
         <button class="btn${t.isSaved ? ' on' : ''}" data-action="save">${t.isSaved ? 'Saved' : 'Save'}</button>
@@ -250,7 +263,7 @@ async function renderDetail() {
         <li><a href="${esc(r.url)}" target="_blank" rel="noopener noreferrer"><span class="r-title">${esc(r.title)}</span>
         <span class="r-domain">${esc(r.domain)} · ${r.sourceCommentId ? 'in comments' : 'in post'}</span></a></li>`).join('')}</ul></section>` : ''}
       <section><h2>Comments</h2>${detail.comments.length ? `<ol class="comments">${detail.comments.map((c) => `
-        <li class="comment" style="--depth:${Math.min(c.depth, 8)}"><div class="c-meta">u/${esc(c.author)} · ↑ ${fmtNum(c.score)}</div><div class="md">${renderMarkdown(c.body)}</div></li>`).join('')}</ol>`
+        <li class="comment" style="--depth:${Math.min(c.depth, 8)}"><div class="c-meta">u/${esc(c.author)}${c.score >= 0 ? ` · ↑ ${fmtNum(c.score)}` : ''}</div><div class="md">${renderMarkdown(c.body)}</div></li>`).join('')}</ol>`
         : t.commentsFetchedAt ? '<p class="muted">No comments yet.</p>' : '<p class="muted">Comments haven\'t been fetched for this thread.</p><button class="btn" data-action="load-comments">Load comments</button>'}</section>
     </article>`;
   el.scrollTop = 0;
@@ -283,7 +296,11 @@ async function syncAll({ full = true, only = null } = {}) {
   const subs = only ? [only] : store.subs.filter((s) => s.isEnabled);
   for (const sub of subs) {
     try {
-      await syncSubreddit(store, sub, { full, onProgress: (p) => { ui.progress = p; renderSidebar(); if (!store.threads.size) renderList(); } });
+      await syncSubreddit(store, sub, {
+        full,
+        onProgress: (p) => { ui.progress = p; renderSidebar(); if (!store.threads.size) renderList(); },
+        onListed: () => { ui.searchDocs = null; renderList(); },
+      });
     } catch (e) { console.warn(`r/${sub.name}:`, e.message); }
     ui.searchDocs = null;
     renderSidebar();
@@ -313,10 +330,13 @@ async function loadComments(id) {
   if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
   try {
     const res = await Reddit.comments(id, store.settings.commentsPerThread || 500);
-    const built = buildThread(res.post || { ...t, subreddit: t.subName, selftext: t.body, createdUTC: t.createdUTC / 1000 }, t.sub, res.tree, store.settings.commentsPerThread || null, t);
+    // A sync may have stored a newer copy of this thread (a new rank, say) while Reddit answered.
+    const cur = store.threads.get(id) || t;
+    const built = buildThread(res.post || postFromThread(cur, cur.score < 0), cur.sub, res.tree, store.settings.commentsPerThread || null, cur, cur.topRank ?? null);
+    if (!res.post) built.thread.isImageOnly = cur.isImageOnly; // a feed sends the comments without the post
     await DB.put('details', { id, comments: built.comments, resources: built.resources });
     store.threads.set(id, built.thread);
-    const sub = subById(t.sub);
+    const sub = subById(cur.sub);
     if (sub) await rescoreSubreddit(store, sub); else await DB.put('threads', built.thread);
     ui.searchDocs = null;
   } catch (e) {
