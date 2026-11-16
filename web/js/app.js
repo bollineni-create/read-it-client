@@ -5,7 +5,7 @@ const SYNC_INTERVALS = { hourly: ['Every hour', 3600e3], sixHours: ['Every 6 hou
 const SORTS = { relevance: 'Relevance', top: 'Top', discussed: 'Most discussed' };
 
 const store = { subs: [], threads: new Map(), settings: null, syncInterval: 'sixHours', lastSyncAll: 0 };
-const ui = { scope: { type: 'all' }, sort: 'relevance', query: '', selected: null, view: 'list', syncing: false, progress: '', searchDocs: null };
+const ui = { scope: { type: 'all' }, sort: 'relevance', query: '', selected: null, view: 'list', syncing: false, progress: '', searchDocs: null, filling: null, waitingForReddit: false };
 
 const $ = (s, root = document) => root.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -175,13 +175,31 @@ function renderSidebar() {
       </div>`).join('') || '<p class="side-empty">No subreddits yet.</p>'}
     </div>
     <div class="side-foot">${esc(syncLine())}</div>`;
+  renderStatus();
 }
 
 function syncLine() {
   if (ui.syncing) return ui.progress || 'Syncing…';
   const last = Math.max(0, ...store.subs.map((s) => s.lastSynced || 0));
   const mode = Reddit.mode === 'server' && !Reddit.feeds ? ' · Reddit API' : '';
-  return last ? (Date.now() - last < 60e3 ? `Synced just now${mode}` : `Synced ${shortAge(last)} ago${mode}`) : 'Not synced yet';
+  const filling = ui.filling ? ` · loading comments ${ui.filling.done + 1} of ${ui.filling.total}` : '';
+  return last ? (Date.now() - last < 60e3 ? `Synced just now${mode}${filling}` : `Synced ${shortAge(last)} ago${mode}${filling}`) : 'Not synced yet';
+}
+
+/** What a sync is doing right now, for the strip above the list; empty when nothing is. */
+function activityLine() {
+  // Reddit's feeds allow about one request a minute; say so while a request waits its turn.
+  const waiting = ui.waitingForReddit ? ' Waiting for Reddit, which allows about one request a minute.' : '';
+  if (ui.syncing) return `${ui.progress || 'Syncing…'}${waiting}`;
+  if (ui.filling) return `Loading comments: ${ui.filling.done + 1} of ${ui.filling.total}.${waiting}`;
+  return '';
+}
+
+function renderStatus() {
+  const el = $('#list-status');
+  const text = activityLine();
+  el.hidden = !text;
+  el.textContent = text;
 }
 
 /**
@@ -207,6 +225,9 @@ async function renderList() {
     return list;
   }
   const now = Date.now();
+  // The list is rebuilt while comments load in the background. The browser keeps the scroll position;
+  // the focused row has to be put back by hand, or a keyboard reader is thrown out of the list.
+  const focused = document.activeElement?.closest?.('#threads .row')?.dataset.id;
   el.innerHTML = list.slice(0, 400).map((t) => {
     const sub = subById(t.sub);
     return `<button class="row${ui.selected === t.id ? ' selected' : ''}" data-id="${t.id}">
@@ -215,6 +236,7 @@ async function renderList() {
       <div class="row-stats">${statsHTML(t, 'span', true)}${t.linkCount ? `<span title="Links">🔗 ${t.linkCount}</span>` : ''}<span class="rel" title="Relevance">${t.relevance.toFixed(0)}</span></div>
     </button>`;
   }).join('');
+  if (focused) [...el.querySelectorAll('.row')].find((row) => row.dataset.id === focused)?.focus({ preventScroll: true });
   return list;
 }
 
@@ -287,29 +309,41 @@ async function persistSettings() {
   await DB.setKV('syncInterval', store.syncInterval);
 }
 
+// Each sync gets a number. Comments keep loading after the listings are in, and a newer sync stops an older one's.
+let syncRun = 0;
+
 async function syncAll({ full = true, only = null } = {}) {
   if (ui.syncing) return;
+  const run = ++syncRun;
+  const alive = () => run === syncRun;
   ui.syncing = true;
+  ui.filling = null;
   ui.progress = 'Connecting to Reddit…';
   render();
   await Reddit.detect();
   const subs = only ? [only] : store.subs.filter((s) => s.isEnabled);
-  for (const sub of subs) {
-    try {
-      await syncSubreddit(store, sub, {
-        full,
-        onProgress: (p) => { ui.progress = p; renderSidebar(); if (!store.threads.size) renderList(); },
-        onListed: () => { ui.searchDocs = null; renderList(); },
-      });
-    } catch (e) { console.warn(`r/${sub.name}:`, e.message); }
+  const listed = async () => {
     ui.searchDocs = null;
     renderSidebar();
     await renderList();
-  }
+    // The open thread may have been waiting for its comments.
+    if (ui.selected && $('[data-action="load-comments"]') && store.threads.get(ui.selected)?.commentsFetchedAt) renderDetail();
+  };
+  let comments = null;
+  try {
+    ({ comments } = await syncSubreddits(store, subs, {
+      full, alive,
+      onProgress: (p) => { ui.progress = p; renderSidebar(); if (!store.threads.size) renderList(); },
+      onListed: listed,
+      onComments: (done, total) => { if (alive()) { ui.filling = done < total ? { done, total } : null; renderSidebar(); } },
+    }));
+  } catch (e) { console.warn(e.message); }
   if (!only) { store.lastSyncAll = Date.now(); await DB.setKV('lastSyncAll', store.lastSyncAll); }
   ui.syncing = false;
   ui.progress = '';
   render();
+  // The listings are in and the page is free again; comments go on loading behind it.
+  if (comments) comments.catch((e) => console.warn(e.message)).then(() => { if (alive()) { ui.filling = null; render(); } });
 }
 
 function maybeAutoSync() {
@@ -577,6 +611,7 @@ async function boot() {
   store.subs = firstRun ? DEFAULT_SUBS.map((n, i) => newSubreddit(n, i)) : subs;
   if (firstRun) { await DB.put('subs', store.subs); await persistSettings(); }
   await render();
+  Reddit.onWait = (ms) => { ui.waitingForReddit = ms > 3000; renderSidebar(); };
   Reddit.detect().then(() => { renderSidebar(); maybeAutoSync(); });
 }
 

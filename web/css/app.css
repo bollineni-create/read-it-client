@@ -99,6 +99,8 @@ a { color: var(--accent); }
 .list-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px 10px; border-bottom: 1px solid var(--line); }
 .list-head h2 { margin: 0; font-size: 16px; font-weight: 650; }
 .list-head .muted { font-size: 12px; }
+/* What a sync is doing right now. The sidebar says it too, but on a phone the sidebar is a closed drawer. */
+.list-status { margin: 0; padding: 7px 14px; font-size: 12px; line-height: 1.35; color: var(--muted); background: var(--accent-soft); border-bottom: 1px solid var(--line); }
 select { background: var(--side); border: 1px solid var(--line); border-radius: 7px; padding: 5px 8px; }
 .threads { overflow-y: auto; flex: 1; padding-bottom: env(safe-area-inset-bottom); }
 .row { display: block; width: 100%; text-align: left; padding: 11px 14px; border: 0; border-bottom: 1px solid var(--line); background: none; cursor: pointer; }
