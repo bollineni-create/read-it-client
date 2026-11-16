@@ -54,7 +54,6 @@ async function syncSubreddit(store, sub, { full = false, onProgress = () => {}, 
     queue = [...queue.filter((p) => !fetched(p)), ...queue.filter(fetched)].slice(0, COMMENT_FETCHES_PER_SUB);
 
     // 3. Store every post first, so the list fills in before the slower comment requests.
-    for (const t of store.threads.values()) if (t.sub === sub.id) t.topRank = null;
     for (const post of posts) {
       const old = store.threads.get(post.id);
       const built = buildThread(post, sub.id, [], 0, old, ranks.get(post.id) ?? null);
@@ -67,6 +66,8 @@ async function syncSubreddit(store, sub, { full = false, onProgress = () => {}, 
       }
       store.threads.set(post.id, built.thread);
     }
+    // A thread that has dropped out of the top listing no longer has a place in it.
+    for (const t of store.threads.values()) if (t.sub === sub.id && !ranks.has(t.id)) t.topRank = null;
     await rescoreSubreddit(store, sub);
     onListed();
 

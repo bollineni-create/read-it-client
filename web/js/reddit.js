@@ -54,15 +54,32 @@ const Reddit = (() => {
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-  // Feed requests are spaced a second apart, like the Mac app's. An answer the site already
-  // had cached never reached Reddit, so the next request doesn't wait for it.
+  // Feed requests go out one at a time, a second apart, like the Mac app's. They queue, so a
+  // sync and a "Load comments" tap at the same moment still reach Reddit in turn. An answer the
+  // site already had cached never reached Reddit, so the next request doesn't wait for it.
   const FEED_SPACING = 1000;
   let nextFeedRequest = 0;
+  let feedQueue = Promise.resolve();
+
+  function spaced(send) {
+    const turn = feedQueue.then(async () => {
+      await sleep(Math.max(0, nextFeedRequest - Date.now()));
+      try {
+        const r = await send();
+        nextFeedRequest = r.headers.get('x-vercel-cache') === 'HIT' ? 0 : Date.now() + FEED_SPACING;
+        return r;
+      } catch (e) {
+        nextFeedRequest = Date.now() + FEED_SPACING;
+        throw e;
+      }
+    });
+    feedQueue = turn.catch(() => {});
+    return turn;
+  }
 
   async function server(route, p) {
-    if (feeds) await sleep(Math.max(0, nextFeedRequest - Date.now()));
-    const r = await fetch(`api/${route}?${qs(p)}`, { headers: { accept: 'application/json' } });
-    if (feeds) nextFeedRequest = r.headers.get('x-vercel-cache') === 'HIT' ? 0 : Date.now() + FEED_SPACING;
+    const send = () => fetch(`api/${route}?${qs(p)}`, { headers: { accept: 'application/json' } });
+    const r = await (feeds ? spaced(send) : send());
     const body = await r.json().catch(() => null);
     if (!r.ok) throw errorFor(r.status, route, p, body);
     return body;

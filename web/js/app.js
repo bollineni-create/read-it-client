@@ -330,11 +330,13 @@ async function loadComments(id) {
   if (btn) { btn.disabled = true; btn.textContent = 'Loading…'; }
   try {
     const res = await Reddit.comments(id, store.settings.commentsPerThread || 500);
-    const built = buildThread(res.post || postFromThread(t, t.score < 0), t.sub, res.tree, store.settings.commentsPerThread || null, t, t.topRank ?? null);
-    if (!res.post) built.thread.isImageOnly = t.isImageOnly; // a feed sends the comments without the post
+    // A sync may have stored a newer copy of this thread (a new rank, say) while Reddit answered.
+    const cur = store.threads.get(id) || t;
+    const built = buildThread(res.post || postFromThread(cur, cur.score < 0), cur.sub, res.tree, store.settings.commentsPerThread || null, cur, cur.topRank ?? null);
+    if (!res.post) built.thread.isImageOnly = cur.isImageOnly; // a feed sends the comments without the post
     await DB.put('details', { id, comments: built.comments, resources: built.resources });
     store.threads.set(id, built.thread);
-    const sub = subById(t.sub);
+    const sub = subById(cur.sub);
     if (sub) await rescoreSubreddit(store, sub); else await DB.put('threads', built.thread);
     ui.searchDocs = null;
   } catch (e) {
