@@ -330,15 +330,18 @@ async function syncAll({ full = true, only = null } = {}) {
     if (ui.selected && $('[data-action="load-comments"]') && store.threads.get(ui.selected)?.commentsFetchedAt) renderDetail();
   };
   let comments = null;
+  let synced = 0;
   try {
-    ({ comments } = await syncSubreddits(store, subs, {
+    ({ synced, comments } = await syncSubreddits(store, subs, {
       full, alive,
       onProgress: (p) => { ui.progress = p; renderSidebar(); if (!store.threads.size) renderList(); },
       onListed: listed,
       onComments: (done, total) => { if (alive()) { ui.filling = done < total ? { done, total } : null; renderSidebar(); } },
     }));
   } catch (e) { console.warn(e.message); }
-  if (!only) { store.lastSyncAll = Date.now(); await DB.setKV('lastSyncAll', store.lastSyncAll); }
+  // A sync that listed no subreddit at all isn't one: leave the clock alone, so it is tried again soon
+  // and not after a whole interval of "Couldn't sync".
+  if (!only && synced) { store.lastSyncAll = Date.now(); await DB.setKV('lastSyncAll', store.lastSyncAll); }
   ui.syncing = false;
   ui.progress = '';
   render();
@@ -346,9 +349,20 @@ async function syncAll({ full = true, only = null } = {}) {
   if (comments) comments.catch((e) => console.warn(e.message)).then(() => { if (alive()) { ui.filling = null; render(); } });
 }
 
+// At most one automatic sync in this long while the page is open, so a sync that keeps failing isn't retried every minute.
+const AUTO_SYNC_GAP = 10 * 60e3;
+let lastAutoSync = 0;
+
 function maybeAutoSync() {
   const interval = SYNC_INTERVALS[store.syncInterval]?.[1];
-  if (interval && Date.now() - store.lastSyncAll > interval) syncAll({ full: false });
+  const now = Date.now();
+  if (!interval || ui.syncing || now - lastAutoSync <= AUTO_SYNC_GAP) return; // no interval: manual
+  // An empty library means nothing ever came in, or the last sync failed outright and left its error on
+  // screen. That is tried again on every visit, whatever the interval.
+  const empty = !store.threads.size && store.subs.some((s) => s.isEnabled);
+  if (!empty && now - store.lastSyncAll <= interval) return;
+  lastAutoSync = now;
+  syncAll({ full: false });
 }
 
 async function toggleSave(id) {
